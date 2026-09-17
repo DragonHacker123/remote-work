@@ -135,10 +135,19 @@ plasticity ON   54.89  54.34  54.24  54.29 ... 53.76  53.70   (-1.19 s)
 
 All 24 cars survive; the entire improvement is in KC→MBON synapses.
 
-**Descending-neuron readout.** A linear fit from the 60 descending neurons
-recovers R² ≈ 0.74 of the reference driver's steering and 0.77 of its
-longitudinal control. That number is the honest ceiling on this approach, and
-raising it is the open problem — see Limitations.
+**Descending-neuron readout.** How much of a competent driving policy is
+linearly available in the fly's motor bus, measured on `national`:
+
+| stage | steer R² | longitudinal R² |
+| --- | --- | --- |
+| closed-form fit, random encoder | 0.74 | 0.77 |
+| after ES on imitation loss | **0.89** | 0.60 |
+
+The jump in steering is the point: the closed-form fit takes the sensory
+encoder as given, and only stage 2 can reshape it. That identifies the encoder,
+not the 60-neuron readout, as what was limiting steering accuracy. Longitudinal
+R² falls because the refit is done on states the *student* reaches rather than
+the teacher's line, which is a harder and more honest target.
 
 ## The control experiment
 
