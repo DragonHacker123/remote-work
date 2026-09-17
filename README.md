@@ -133,7 +133,9 @@ generations, ~50 min on 4 cores), the connectome brain completes laps of
 So it drives the whole circuit, about 1.5x slower than a controller built from
 explicit vehicle dynamics. It does not yet beat the teacher, which is the
 honest state of it — stage 3 optimises speed, and 180 generations on one
-machine is not many.
+machine is not many. See the control experiment below for what the same
+pipeline does on shuffled wiring; the comparison is not the clean win it might
+look like from this table alone.
 
 **Central complex.** `PFL3R − PFL3L` versus heading error: r = −0.99 against a
 sine, steepest at zero error, corrective sign, and invariant to absolute
@@ -177,8 +179,41 @@ destroying only neuron-level wiring specificity. Weaker controls (`pairing`,
 `signs`, `weights`) are also available. Degree preservation is asserted in the
 test suite, not assumed.
 
-If the real connectome does not beat these, you have an elaborately-sourced
-sparse RNN with a good origin story. Report it either way.
+### What it showed
+
+Identical pipeline, identical budget, identical seed — only the wiring differs:
+
+| | real connectome | within-type shuffle |
+| --- | --- | --- |
+| laps completed | **31/32** | **1/32** |
+| best lap | 81.88 s | 63.06 s |
+| mean distance before retiring | 2686 m (97%) | 1077 m (39%) |
+| steer R², closed-form fit | 0.742 | 0.748 |
+| steer R², after imitation ES | 0.888 | 0.854 |
+| training progress, 18 s horizon | 555 m (best 645) | 562 m (best 753) |
+
+Read the bottom three rows before the top one. By every *training-time*
+measure the shuffle is indistinguishable from the real connectome — it fits the
+readout equally well and covers marginally more ground per 18-second horizon.
+The difference appears only when a full lap has to be completed: real wiring
+finishes 31 laps out of 32, the shuffle finishes one.
+
+And the one lap the shuffle did finish was **18 seconds faster**. So the honest
+statement is not "the connectome drives better". It is that the real wiring
+produced a far more *robust* policy while the shuffle produced a faster and
+much more brittle one, and that the fixed-horizon training objective could not
+tell them apart.
+
+**This is one seed per arm.** A 31-versus-1 split is a large effect, but it is a
+single sample of a stochastic pipeline, and the natural failure mode of this
+kind of experiment is reporting seed variance as a finding. Replicate before
+believing it:
+
+```bash
+for s in 0 1 2 3 4; do
+  python scripts/run_experiment.py --seed $s --out results/seed$s
+done
+```
 
 ## Using the real FlyWire connectome
 

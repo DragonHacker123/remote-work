@@ -41,6 +41,8 @@ def main() -> None:
     ap.add_argument("--envs", type=int, default=24)
     ap.add_argument("--horizon", type=float, default=18.0)
     ap.add_argument("--workers", type=int, default=4)
+    # One seed per arm is a single sample of a stochastic pipeline. Large
+    # effects here can still be seed variance, so vary this and pool.
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--controls", default="none,within-type")
     ap.add_argument("--out", default="results")
