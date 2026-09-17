@@ -175,6 +175,13 @@ def run_learning_session(
 
     The inherited parameters of ``brain`` are never touched. Everything that
     improves across laps lives in the KC->MBON weights.
+
+    Caveat worth stating plainly: every car in the batch shares one mushroom
+    body, so ``n_envs`` cars contribute ``n_envs`` independent perturbations per
+    sector per lap. That is variance reduction, not biology -- a single fly has
+    one brain and would need proportionally more laps to extract the same
+    signal. The learning rule is identical either way; only the sample rate
+    differs.
     """
     track = env.track
     n = env.n

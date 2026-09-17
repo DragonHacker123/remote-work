@@ -63,7 +63,8 @@ answer would be the whole trick.
 
 ```bash
 pip install -e ".[dev]"
-pytest                                  # 45 tests, ~30 s
+pytest -m "not slow"                    # 59 tests, ~35 s
+pytest                                  # adds 2 end-to-end runs, several minutes
 
 flydrive info                           # connectome and track summary
 flydrive reference --track national      # classical driver's lap time
@@ -106,6 +107,37 @@ Everything that changes lives in the KC→MBON synapses:
   has managed *there*, so the baseline is its own history.
 - The update is the mushroom body's three-factor rule — presynaptic KC activity
   × postsynaptic perturbation × dopamine.
+
+## Measured
+
+Reference driver, for scale — these are the lap times the learned network is
+judged against:
+
+| circuit | length | reference lap | average |
+| --- | --- | --- | --- |
+| oval | 2142 m | 29.90 s | 258 km/h |
+| national | 2757 m | 54.88 s | 181 km/h |
+| gp | 4457 m | 71.90 s | 223 km/h |
+| technical | 2236 m | 56.00 s | 144 km/h |
+
+**Central complex.** `PFL3R − PFL3L` versus heading error: r = −0.99 against a
+sine, steepest at zero error, corrective sign, and invariant to absolute
+heading. In closed loop while driving, the PFL3 difference tracks heading error
+at r = 0.88.
+
+**Mushroom body.** 16 laps of `national` with inherited parameters frozen:
+
+```
+plasticity OFF  54.45  54.06  54.06  54.06 ... 54.06  54.06   (flat)
+plasticity ON   54.89  54.34  54.24  54.29 ... 53.76  53.70   (-1.19 s)
+```
+
+All 24 cars survive; the entire improvement is in KC→MBON synapses.
+
+**Descending-neuron readout.** A linear fit from the 60 descending neurons
+recovers R² ≈ 0.74 of the reference driver's steering and 0.77 of its
+longitudinal control. That number is the honest ceiling on this approach, and
+raising it is the open problem — see Limitations.
 
 ## The control experiment
 
@@ -216,7 +248,7 @@ flydrive/
   learn/        ES, distillation, three-stage curriculum, MB plasticity
   bridge/       F1 25 UDP telemetry, virtual gamepad, live loop
 scripts/        run_experiment.py -- real connectome vs shuffled control
-tests/          45 tests; the central-complex ones are the load-bearing ones
+tests/          61 tests; the central-complex ones are the load-bearing ones
 ```
 
 ## Limitations
