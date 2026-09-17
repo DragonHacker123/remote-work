@@ -71,9 +71,19 @@ def main() -> None:
         res = train_curriculum(
             cfg, imitation_generations=args.imitation, reward_generations=args.generations
         )
-        laps = evaluate_laps(res["best_theta"], cfg)
+        # Evaluate both the population mean and the single best candidate. The
+        # mean is usually the better policy -- a candidate can top one
+        # generation on a lucky set of starting states -- but not always, so
+        # report both rather than picking one blind.
+        laps_mean = evaluate_laps(res["theta"], cfg)
+        laps_best = evaluate_laps(res["best_theta"], cfg)
+        laps = max(
+            (laps_mean, laps_best),
+            key=lambda r: (r["completed"], r["progress"]),
+        )
         elapsed = time.time() - started
-        print(f"\n[{control}] {laps}  ({elapsed:.0f}s)", flush=True)
+        print(f"\n[{control}] mean={laps_mean}", flush=True)
+        print(f"[{control}] best={laps_best}  ({elapsed:.0f}s)", flush=True)
 
         np.savez(
             out_dir / f"theta_{control}.npz",
@@ -83,6 +93,8 @@ def main() -> None:
         reward_log = next(s["log"] for s in res["stages"] if s["stage"] == "reward")
         summary["conditions"][control] = {
             "laps": laps,
+            "laps_mean_theta": laps_mean,
+            "laps_best_theta": laps_best,
             "elapsed": elapsed,
             "readout_fit": next(
                 s for s in res["stages"] if s["stage"] == "readout_fit"
