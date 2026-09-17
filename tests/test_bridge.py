@@ -152,6 +152,62 @@ def test_yaw_rate_is_differentiated_from_heading():
         receiver.close()
 
 
+def test_full_bridge_loop_against_a_synthetic_game():
+    """Drive the whole bridge with a fake F1 25 emitting real packets.
+
+    Exercises receive -> fuse -> observe -> brain -> gamepad, which is the one
+    path that cannot be checked against the actual game from here.
+    """
+    import socket
+    import threading
+
+    from flydrive.agents.net import ConnectomeBrain, driving_subgraph
+    from flydrive.bridge.run import BridgeConfig, drive
+    from flydrive.connectome import build_surrogate
+    from flydrive.sim import get_track
+
+    track = get_track("oval")
+    brain = ConnectomeBrain(driving_subgraph(build_surrogate(scale=0.35, seed=0)))
+
+    port = 20999
+    stop = threading.Event()
+
+    def fake_game():
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        t = 0.0
+        i = 0
+        while not stop.is_set():
+            # Walk the car along the oval's centreline at 40 m/s.
+            i = (i + 2) % track.n
+            x, y = track.xy[i]
+            psi = track.psi[i]
+            sock.sendto(
+                make_motion_packet(
+                    position=(x, 0.0, y),
+                    velocity=(40.0 * np.cos(psi), 0.0, 40.0 * np.sin(psi)),
+                    forward=(np.cos(psi), 0.0, np.sin(psi)),
+                    session_time=t,
+                ),
+                ("127.0.0.1", port),
+            )
+            sock.sendto(make_telemetry_packet(speed=144), ("127.0.0.1", port))
+            t += 0.02
+            stop.wait(0.004)
+        sock.close()
+
+    sender = threading.Thread(target=fake_game, daemon=True)
+    sender.start()
+    try:
+        result = drive(
+            brain, track, BridgeConfig(port=port, rate_hz=50.0, dry_run=True, max_seconds=1.5)
+        )
+    finally:
+        stop.set()
+        sender.join(timeout=2.0)
+
+    assert result["steps"] > 20, f"bridge only ran {result['steps']} steps"
+
+
 def test_null_gamepad_records_and_clamps():
     pad = NullGamepad()
     pad.send(0.3, 0.8, 0.0)
