@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from flydrive.agents.classical import PurePursuitDriver, corner_speed
+from flydrive.agents.classical import ReferenceDriver, corner_speed
 from flydrive.sim import get_track, make_env
 from flydrive.sim.track import TRACKS, from_layout
 from flydrive.sim.vehicle import G, VehicleParams, step_dynamics
@@ -139,7 +139,7 @@ def test_downforce_raises_the_cornering_limit():
 @pytest.mark.parametrize("name", ["oval", "national", "gp", "technical"])
 def test_reference_driver_completes_a_lap(name):
     env = make_env(name, n_envs=1, random_start=False, max_seconds=300.0)
-    out = env.rollout(PurePursuitDriver(half_width=env.track.half_width))
+    out = env.rollout(ReferenceDriver(half_width=env.track.half_width))
     assert out["retired"][0] == 0, f"retired on {name}"
     assert not np.isnan(out["lap_time"][0])
     avg_kph = env.track.length / out["lap_time"][0] * 3.6
@@ -148,7 +148,7 @@ def test_reference_driver_completes_a_lap(name):
 
 def test_reference_driver_is_robust_to_random_starts():
     env = make_env("national", n_envs=64, random_start=True, max_seconds=120.0)
-    out = env.rollout(PurePursuitDriver(half_width=env.track.half_width), seed=3)
+    out = env.rollout(ReferenceDriver(half_width=env.track.half_width), seed=3)
     assert np.mean(~np.isnan(out["lap_time"])) > 0.95
 
 

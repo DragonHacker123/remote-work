@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..agents.classical import PurePursuitDriver
+from ..agents.classical import ReferenceDriver
 from ..agents.net import ConnectomeBrain
 from ..sim.env import RaceEnv
 
@@ -44,7 +44,7 @@ def collect(
     when re-fitting a partly trained network, so the readout is fitted on the
     states it will actually encounter rather than only the teacher's line.
     """
-    teacher = teacher or PurePursuitDriver(params=env.cfg.params, half_width=env.track.half_width)
+    teacher = teacher or ReferenceDriver(params=env.cfg.params, half_width=env.track.half_width)
     obs = env.reset(seed=seed)
     brain.reset(env.n)
     if hasattr(teacher, "reset"):
@@ -97,7 +97,7 @@ def imitation_loss(
     no training signal for. Letting it drift and still labelling with the
     teacher is what closes that gap.
     """
-    teacher = teacher or PurePursuitDriver(
+    teacher = teacher or ReferenceDriver(
         params=env.cfg.params, half_width=env.track.half_width
     )
     obs = env.reset(seed=seed)

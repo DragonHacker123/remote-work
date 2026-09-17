@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from ..agents.classical import PurePursuitDriver
+from ..agents.classical import ReferenceDriver
 from ..agents.net import BrainConfig, ConnectomeBrain, driving_subgraph
 from ..connectome import apply_control, build_surrogate
 from ..sim import make_env
@@ -60,7 +60,7 @@ def _init_worker(cfg: TrainConfig) -> None:
         cfg.track, n_envs=cfg.n_envs, seed=cfg.seed, max_seconds=cfg.horizon_seconds
     )
     _W["env"] = env
-    _W["teacher"] = PurePursuitDriver(
+    _W["teacher"] = ReferenceDriver(
         params=env.cfg.params, half_width=env.track.half_width
     )
     _W["horizon"] = int(cfg.horizon_seconds * env.cfg.control_hz)

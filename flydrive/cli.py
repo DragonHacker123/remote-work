@@ -39,11 +39,11 @@ def cmd_info(args) -> int:
 
 
 def cmd_reference(args) -> int:
-    from .agents.classical import PurePursuitDriver
+    from .agents.classical import ReferenceDriver
     from .sim import make_env
 
     env = make_env(args.track, n_envs=1, random_start=False, max_seconds=400.0)
-    out = env.rollout(PurePursuitDriver(half_width=env.track.half_width))
+    out = env.rollout(ReferenceDriver(half_width=env.track.half_width))
     lap = out["lap_time"][0]
     if np.isnan(lap):
         print(f"reference driver did not finish (retired code {out['retired'][0]})")
@@ -124,7 +124,7 @@ def cmd_evaluate(args) -> int:
 
 def cmd_session(args) -> int:
     """Run repeated laps with mushroom-body plasticity on or off."""
-    from .agents.classical import PurePursuitDriver
+    from .agents.classical import ReferenceDriver
     from .connectome import build_surrogate
     from .learn.mb import MBConfig, MushroomBody, run_learning_session
     from .sim import make_env
@@ -140,7 +140,7 @@ def cmd_session(args) -> int:
         policy = ConnectomeBrain(driving_subgraph(conn))
         policy.set_params(_load_theta(args.theta))
     else:
-        policy = PurePursuitDriver(half_width=env.track.half_width)
+        policy = ReferenceDriver(half_width=env.track.half_width)
         print("no --theta given; using the reference driver as the base policy")
 
     for learn in (False, True):

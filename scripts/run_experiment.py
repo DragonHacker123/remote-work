@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
-from flydrive.agents.classical import PurePursuitDriver
+from flydrive.agents.classical import ReferenceDriver
 from flydrive.learn.es import ESConfig
 from flydrive.learn.train import TrainConfig, evaluate_laps, train_curriculum
 from flydrive.sim import make_env
@@ -24,7 +24,7 @@ from flydrive.sim import make_env
 
 def reference_lap(track: str) -> dict:
     env = make_env(track, n_envs=8, random_start=False, max_seconds=300.0)
-    out = env.rollout(PurePursuitDriver(half_width=env.track.half_width))
+    out = env.rollout(ReferenceDriver(half_width=env.track.half_width))
     laps = out["lap_time"]
     return {
         "lap_time": float(np.nanmin(laps)) if np.any(~np.isnan(laps)) else float("nan"),

@@ -22,12 +22,12 @@ reason this project is worth doing, so handing it the answer would be cheating.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
 from ..connectome.schema import Connectome
-from ..sim.obs import FEATURE_SLICE, OBS_DIM, ring_angles
+from ..sim.obs import FEATURE_SLICE, ring_angles
 
 FEATURE_DIM = FEATURE_SLICE.stop - FEATURE_SLICE.start
 

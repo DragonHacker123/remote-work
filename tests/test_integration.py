@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from flydrive.agents.classical import PurePursuitDriver
+from flydrive.agents.classical import ReferenceDriver
 from flydrive.agents.net import ConnectomeBrain, driving_subgraph
 from flydrive.connectome import build_surrogate
 from flydrive.learn.distill import fit_readout, imitation_loss
@@ -63,7 +63,7 @@ def test_mushroom_body_improves_lap_times_with_inherited_weights_frozen():
     env = make_env(
         "national", n_envs=24, random_start=False, max_seconds=laps * 80.0, target_laps=laps + 1
     )
-    base = PurePursuitDriver(half_width=env.track.half_width)
+    base = ReferenceDriver(half_width=env.track.half_width)
 
     results = {}
     for learn in (False, True):

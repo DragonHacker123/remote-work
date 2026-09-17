@@ -1,4 +1,4 @@
-"""A classical reference driver: pure pursuit plus a friction-limited speed profile.
+"""A classical reference driver: Stanley feedback plus a friction-limited speed profile.
 
 This is the yardstick. It is deterministic, has no training variance, and is
 built from textbook vehicle dynamics rather than learning, so it answers "how
@@ -28,7 +28,6 @@ from ..sim.obs import (
     PREVIEW_DISTANCES,
     R_SCALE,
     V_SCALE,
-    pursuit_angle,
 )
 from ..sim.vehicle import G, VehicleParams
 
@@ -47,8 +46,15 @@ def corner_speed(kappa: np.ndarray, p: VehicleParams, v_top: float = 95.0) -> np
     return np.minimum(np.sqrt(np.maximum(v2, 0.0)), v_top)
 
 
-class PurePursuitDriver:
-    """Geometric steering + speed profile from the curvature preview."""
+class ReferenceDriver:
+    """Curvature feedforward + Stanley feedback, with a backward speed profile.
+
+    Pure pursuit was tried first and abandoned. A fixed aim point cannot work
+    across a 20-90 m/s speed range -- far enough to be stable at 90 cuts every
+    apex at 30, and near enough to be precise at 30 sends the steering loop
+    into oscillation at 90. Stanley's cross-track term is divided by speed,
+    which gives the required behaviour at both ends for free.
+    """
 
     def __init__(
         self,

@@ -187,7 +187,9 @@ def run_learning_session(
     obs = env.reset(seed=seed)
     brain.reset(n)
 
-    sector_of = lambda idx: (idx * mb.cfg.n_sectors // track.n).astype(np.int64)
+    def sector_of(idx: np.ndarray) -> np.ndarray:
+        return (idx * mb.cfg.n_sectors // track.n).astype(np.int64)
+
     cur_sector = sector_of(env.idx)
     sector_start = np.zeros(n)
     active_code = mb.kc_code(cur_sector.astype(float))
