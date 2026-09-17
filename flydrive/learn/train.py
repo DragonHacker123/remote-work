@@ -38,6 +38,7 @@ class TrainConfig:
     seed: int = 0
     log_every: int = 1
     objective: str = "reward"          # "reward" or "imitation"
+    checkpoint_every: int = 0          # 0 disables; otherwise snapshot theta every N gens
     es: ESConfig = field(default_factory=ESConfig)
 
 
@@ -103,6 +104,7 @@ def train(cfg: TrainConfig, callback=None, theta0: np.ndarray | None = None) -> 
         _init_worker(cfg)
 
     log: list[dict] = []
+    checkpoints: list[dict] = []
     best = {"fitness": -np.inf, "theta": optimizer.theta.copy()}
     started = time.time()
     try:
@@ -131,6 +133,18 @@ def train(cfg: TrainConfig, callback=None, theta0: np.ndarray | None = None) -> 
                 "elapsed": time.time() - started,
             }
             log.append(row)
+            if cfg.checkpoint_every and (
+                gen % cfg.checkpoint_every == 0 or gen == cfg.generations - 1
+            ):
+                checkpoints.append(
+                    {
+                        "stage": cfg.objective,
+                        "gen": gen,
+                        "theta": optimizer.theta.copy(),
+                        "fit_mean": row["fit_mean"],
+                        "progress_mean": row["progress_mean"],
+                    }
+                )
             if callback:
                 callback(row)
             elif cfg.log_every and gen % cfg.log_every == 0:
@@ -151,8 +165,19 @@ def train(cfg: TrainConfig, callback=None, theta0: np.ndarray | None = None) -> 
         "best_theta": best["theta"],
         "best_fitness": best["fitness"],
         "log": log,
+        "checkpoints": checkpoints,
         "config": cfg,
     }
+
+
+def _closed_loop_progress(theta: np.ndarray, cfg: TrainConfig, seconds: float = 60.0) -> float:
+    """Mean distance covered driving unaided -- the only score that matters."""
+    brain = build_brain(cfg)
+    brain.set_params(theta)
+    env = make_env(
+        cfg.track, n_envs=min(cfg.n_envs, 16), seed=cfg.seed + 11, max_seconds=seconds
+    )
+    return float(env.rollout(brain, seed=cfg.seed + 11)["progress"].mean())
 
 
 def train_curriculum(
@@ -184,21 +209,40 @@ def train_curriculum(
     if cfg.log_every:
         print(f"[1/3] readout fit: {fit}", flush=True)
 
+    checkpoints: list[dict] = [
+        {"stage": "readout_fit", "gen": 0, "theta": theta.copy(),
+         "fit_mean": float("nan"), "progress_mean": float("nan")}
+    ]
+
     if imitation_generations > 0:
         icfg = replace(cfg, objective="imitation", generations=imitation_generations)
         res = train(icfg, callback=callback, theta0=theta)
         theta = res["theta"]
+        checkpoints.extend(res["checkpoints"])
         stages.append({"stage": "imitation", "log": res["log"]})
         # Re-fit the readout on the reshaped encoder: it is free and exact.
+        # But keep it only if it actually drives further. A readout can fit the
+        # teacher better -- even markedly better -- and still be a worse
+        # closed-loop policy, because R^2 is measured on states the teacher
+        # visits and the car has to survive the ones it reaches itself.
+        before = theta.copy()
         brain.set_params(theta)
         fit2 = fit_readout(
             brain, env, steps=int(cfg.horizon_seconds * 50), seed=cfg.seed,
             student_frac=0.5,   # refit on states the student actually reaches
         )
-        theta = brain.theta.copy()
+        after = brain.theta.copy()
+        drove_before = _closed_loop_progress(before, cfg)
+        drove_after = _closed_loop_progress(after, cfg)
+        kept = drove_after >= drove_before
+        theta = after if kept else before
+        fit2 = {**fit2, "progress_before": drove_before,
+                "progress_after": drove_after, "kept": kept}
         stages.append({"stage": "readout_refit", **fit2})
         if cfg.log_every:
-            print(f"[2/3] readout refit: {fit2}", flush=True)
+            verdict = "kept" if kept else "discarded (drove worse)"
+            print(f"[2/3] readout refit {verdict}: {drove_before:.0f} m -> "
+                  f"{drove_after:.0f} m, {fit2['r2_steer']:.3f} steer R^2", flush=True)
 
     res = train(
         replace(cfg, objective="reward", generations=reward_generations),
@@ -206,10 +250,12 @@ def train_curriculum(
         theta0=theta,
     )
     stages.append({"stage": "reward", "log": res["log"]})
+    checkpoints.extend(res["checkpoints"])
     return {
         "theta": res["theta"],
         "best_theta": res["best_theta"],
         "stages": stages,
+        "checkpoints": checkpoints,
         "config": cfg,
     }
 
