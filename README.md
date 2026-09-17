@@ -20,7 +20,8 @@ blunt about which one this is.
 In (2) the connectivity matrix is **fixed and never trained**. What is learned
 is small and biologically shaped: one output gain, one time constant and one
 resting drive per *cell type*; a sensory encoder; and a linear readout from the
-descending neurons. About 1,100 parameters for a 686-neuron driving network.
+descending neurons. About 1,800 parameters over a 846-neuron, 16k-synapse
+driving network — roughly two parameters per neuron, none of them a synapse.
 
 ## Why the fly, specifically
 
@@ -45,14 +46,14 @@ Feed the EPG ring a heading bump and the FC2 ring a goal bump, and
 ```
 $ flydrive probe-cx
  heading error   PFL3R-PFL3L    steer
-     -90 deg   +0.2577 |----------------------- | +0.091
-     -30 deg   +0.1264 |-----------             | +0.045
-      +0 deg   -0.0318 |                      --| -0.011
-     +30 deg   -0.1649 |         ---------------| -0.057
-     +90 deg   -0.2410 |  ----------------------| -0.084
+     -90 deg   +0.2577 |----------------------- | +0.070
+     -30 deg   +0.1264 |-----------             | +0.035
+      +0 deg   -0.0318 |                      --| -0.010
+     +30 deg   -0.1649 |         ---------------| -0.048
+     +90 deg   -0.2410 |  ----------------------| -0.070
 
 corr(PFL3 difference, sin(heading error)) = -0.991
-corr(steer, heading error) = -0.739 (negative means corrective)
+corr(steer, heading error) = -0.738 (negative means corrective)
 ```
 
 The heading and goal go in as **two separate bumps**, never as a precomputed
