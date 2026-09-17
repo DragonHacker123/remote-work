@@ -121,6 +121,20 @@ judged against:
 | gp | 4457 m | 71.90 s | 223 km/h |
 | technical | 2236 m | 56.00 s | 144 km/h |
 
+**Driving.** After the three-stage curriculum (50 imitation + 180 reward
+generations, ~50 min on 4 cores), the connectome brain completes laps of
+`national`:
+
+| driver | laps completed | best lap | average speed |
+| --- | --- | --- | --- |
+| classical reference | 32/32 | 54.06 s | 184 km/h |
+| connectome brain | **31/32** | **81.88 s** | 121 km/h |
+
+So it drives the whole circuit, about 1.5x slower than a controller built from
+explicit vehicle dynamics. It does not yet beat the teacher, which is the
+honest state of it — stage 3 optimises speed, and 180 generations on one
+machine is not many.
+
 **Central complex.** `PFL3R − PFL3L` versus heading error: r = −0.99 against a
 sine, steepest at zero error, corrective sign, and invariant to absolute
 heading. In closed loop while driving, the PFL3 difference tracks heading error
@@ -271,3 +285,9 @@ tests/          61 tests; the central-complex ones are the load-bearing ones
   preview; those channels are engineering, not biology, and they are where a
   sceptic should look first.
 - The bridge has never seen the real game.
+- The brain laps 1.5x slower than a classical controller. That gap is the
+  headline open problem, and the training budget here (180 reward generations
+  on four cores) is small enough that it is not yet evidence of a ceiling.
+- Mushroom-body sessions run many cars sharing one set of KC→MBON weights.
+  That multiplies the learning signal per lap and is a convenience, not a
+  claim about flies.
