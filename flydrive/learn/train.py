@@ -227,11 +227,19 @@ def evaluate_laps(
     out = env.rollout(brain, seed=cfg.seed + 1)
     laps = out["lap_time"]
     done = ~np.isnan(laps)
+
+    # Where and how the car gives up is more useful than the bare distance: a
+    # policy that always dies at the same metre mark has one specific problem,
+    # not a general lack of skill.
+    reasons = {0: "finished", 1: "off-track", 2: "spun", 3: "stalled"}
+    counts = np.bincount(out["retired"], minlength=4)
     return {
         "completed": int(done.sum()),
         "n": n_envs,
         "lap_time": float(np.nanmin(laps)) if done.any() else float("nan"),
         "mean_lap": float(np.nanmean(laps)) if done.any() else float("nan"),
         "progress": float(out["progress"].mean()),
+        "progress_max": float(out["progress"].max()),
         "track_length": env.track.length,
+        "retired": {reasons[i]: int(c) for i, c in enumerate(counts) if c},
     }
