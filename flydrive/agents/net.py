@@ -44,6 +44,14 @@ class BrainConfig:
     tau_min: float = 0.015        # s; must exceed the neural step for stability
     tau_max: float = 0.300
     rate_max: float = 5.0         # saturating firing rate, arbitrary units
+    # Sharpness of the rectifier. A hard max(x, 0) has a genuinely dead zone:
+    # a population driven below threshold produces exactly zero for every
+    # perturbation, so evolution gets no signal that could ever revive it, and
+    # whole descending populations switch off permanently and never come back.
+    # A softplus keeps a small non-zero slope below threshold -- real neurons
+    # have spontaneous activity too -- while beta this high still rectifies
+    # sharply enough for the PFL3 population-sum mechanism to work.
+    rate_beta: float = 5.0
     enc_channels: int = 24
     input_ports: tuple[str, ...] = ("T4T5", "LPLC2", "AN", "context")
     readout_ports: tuple[str, ...] = ("turn_L", "turn_R", "speed", "stop")
@@ -123,9 +131,20 @@ class ConnectomeBrain:
         self.layout.add("dec_w", (len(self.readout), 2))
         self.layout.add("dec_b", (2,))
 
+        # Where each readout population sits inside the concatenated readout.
+        self._readout_groups = {}
+        offset = 0
+        for name in self.cfg.readout_ports:
+            if name not in conn.ports:
+                continue
+            size = len(conn.port(name))
+            self._readout_groups[name] = np.arange(offset, offset + size)
+            offset += size
+
         self.theta = self.initial_params()
         self.set_params(self.theta)
         self.state = np.zeros((self.n, 1))
+        self.port_peaks = {name: 0.0 for name in self._readout_groups}
 
     # ------------------------------------------------------------ parameters
 
@@ -206,6 +225,13 @@ class ConnectomeBrain:
         self.alpha = (dt_neural / tau[types])[:, None]
         self.bias_n = self.par["bias"][types][:, None]
 
+    def _rate(self, x: np.ndarray) -> np.ndarray:
+        """Firing rate from membrane state: a sharp softplus, capped."""
+        beta = self.cfg.rate_beta
+        # log1p(exp(-|bx|))/b + max(x, 0) -- the overflow-safe softplus.
+        soft = np.log1p(np.exp(-np.abs(beta * x))) / beta + np.maximum(x, 0.0)
+        return np.minimum(soft, self.cfg.rate_max)
+
     # ---------------------------------------------------------------- inputs
 
     def _external(self, obs: np.ndarray) -> np.ndarray:
@@ -232,6 +258,18 @@ class ConnectomeBrain:
 
     def reset(self, n: int) -> None:
         self.state = np.zeros((self.n, n))
+        self.port_peaks = {name: 0.0 for name in self._readout_groups}
+
+    def _track_usage(self, rates: np.ndarray) -> None:
+        """Record how hard each descending population is being driven.
+
+        Used to detect the motor bus collapsing onto a single channel, which
+        the reward alone has no reason to prevent.
+        """
+        for name, idx in self._readout_groups.items():
+            peak = float(rates[idx].mean())
+            if peak > self.port_peaks[name]:
+                self.port_peaks[name] = peak
 
     def __call__(self, obs: np.ndarray) -> np.ndarray:
         if self.state.shape[1] != obs.shape[0]:
@@ -239,12 +277,13 @@ class ConnectomeBrain:
         u = self._external(obs)
         x = self.state
         for _ in range(self.cfg.inner_steps):
-            r = np.clip(x, 0.0, self.cfg.rate_max)
+            r = self._rate(x)
             x = x + self.alpha * (-x + self.matrix @ r + self.bias_n + u)
             x = np.clip(x, -20.0, 20.0)
         self.state = x
 
-        rates = np.clip(x[self.readout], 0.0, self.cfg.rate_max)      # (R, B)
+        rates = self._rate(x[self.readout])                           # (R, B)
+        self._track_usage(rates)
         z = rates.T @ self.par["dec_w"] + self.par["dec_b"]           # (B, 2)
         longitudinal = z[:, 1]
         return np.column_stack(
@@ -259,11 +298,11 @@ class ConnectomeBrain:
 
     def rates(self, port: str) -> np.ndarray:
         """Current firing rates of a named population, for analysis."""
-        return np.clip(self.state[self.conn.port(port)], 0.0, self.cfg.rate_max)
+        return self._rate(self.state[self.conn.port(port)])
 
     def readout_rates(self) -> np.ndarray:
         """Descending-neuron rates as (B, R), the features the decoder reads."""
-        return np.clip(self.state[self.readout], 0.0, self.cfg.rate_max).T
+        return self._rate(self.state[self.readout]).T
 
     def advance(self, obs: np.ndarray) -> None:
         """Step the network without producing an action (used for teacher forcing)."""

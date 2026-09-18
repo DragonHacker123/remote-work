@@ -148,6 +148,7 @@
     <div class="stat">circuit <b id="s-control">—</b></div>
     <div class="stat">track <b id="s-track">—</b> · <b id="s-len">—</b></div>
     <div class="stat">reference lap <b id="s-ref">—</b></div>
+    <div class="stat">best fly lap <b id="s-fast">—</b></div>
   </header>
 
   <section class="strip">
@@ -318,14 +319,40 @@ function buildBrain() {
 /* Distance actually travelled along the recorded trajectory, rather than a
    share of the final figure -- the car does not cover ground at a constant
    rate, so the pro-rata version reads wrong exactly where it matters. */
+/* Neural traces arrive base64-packed, one byte per neuron per frame, because a
+   Spa lap at full JSON would be most of a ten-megabyte page. */
+const byteCache = {};
+function bytes(ck, key) {
+  const id = ck + "/" + key;
+  if (!(id in byteCache)) {
+    const raw = atob(DATA.checkpoints[ck].frames[key] || "");
+    const arr = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    byteCache[id] = arr;
+  }
+  return byteCache[id];
+}
+function popRow(ck, key, i) {
+  const w = DATA.widths[key];
+  const a = bytes(ck, key);
+  const at = Math.min(i, Math.max(0, Math.floor(a.length / w) - 1));
+  return a.subarray(at * w, (at + 1) * w);
+}
+function meanAt(ck, key, i) {
+  const a = bytes(ck, key);
+  return a.length ? a[Math.min(i, a.length - 1)] : 0;
+}
+
 /* Peak activity of a population within one checkpoint, so a channel that
    training has driven silent can be shown as silent rather than as zero. */
 const maxCache = {};
 function ckMax(ck, key) {
   const id = ck + "/" + key;
   if (!(id in maxCache)) {
-    const v = DATA.checkpoints[ck].frames[key];
-    maxCache[id] = v && v.length ? Math.max(...v) : 0;
+    const a = bytes(ck, key);
+    let m = 0;
+    for (let i = 0; i < a.length; i++) if (a[i] > m) m = a[i];
+    maxCache[id] = m;
   }
   return maxCache[id];
 }
@@ -456,17 +483,18 @@ function render() {
   drawTrack();
 
   for (const key of ["epg", "fc2", "d7", "pfl3l", "pfl3r"]) {
-    const row = f[key][i] || [];
+    const row = popRow(S.ck, key, i);
     cells[key].forEach((node, j) => node.setAttribute("fill", lut(row[j] || 0)));
   }
-  const sumL = (f.pfl3l[i] || []).reduce((a, b) => a + b, 0);
-  const sumR = (f.pfl3r[i] || []).reduce((a, b) => a + b, 0);
+  let sumL = 0, sumR = 0;
+  const rowL = popRow(S.ck, "pfl3l", i), rowR = popRow(S.ck, "pfl3r", i);
+  for (let j = 0; j < rowL.length; j++) { sumL += rowL[j]; sumR += rowR[j]; }
   const diff = sumR - sumL;
   const sumEl = document.getElementById("cxsum");
   if (sumEl) sumEl.textContent = `PFL3 right − left = ${diff >= 0 ? "+" : ""}${Math.round(diff)}`;
 
   for (const [key] of METERS) {
-    const v = f[key][i] || 0;
+    const v = meanAt(S.ck, key, i);
     const silent = (ckMax(S.ck, key) === 0);
     meterEls[key].fill.style.width = v + "%";
     meterEls[key].val.textContent = silent ? "—" : Math.round(v);
@@ -588,6 +616,10 @@ function boot() {
   $("s-track").textContent = DATA.track.name;
   $("s-len").textContent = Math.round(DATA.track.length) + " m";
   $("s-ref").textContent = DATA.reference.lap_time + " s";
+  const fast = DATA.fastest_lap
+    || DATA.checkpoints.reduce((a, c) => (c.lap_time && (!a || c.lap_time < a) ? c.lap_time : a), null);
+  $("s-fast").textContent = fast ? fast.toFixed(2) + " s" : "no lap yet";
+  $("s-fast").style.color = fast ? "var(--accent)" : "var(--dim)";
   $("s-control").textContent = DATA.control === "none" ? "fly connectome" : DATA.control + " shuffle";
   $("scrub").max = DATA.checkpoints.length - 1;
 

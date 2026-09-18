@@ -154,7 +154,11 @@ def _close_curvature(kappa: np.ndarray, ds: float, iters: int = 40) -> np.ndarra
         psi = np.cumsum(k) * ds
         return np.array([np.sum(np.cos(psi)) * ds, np.sum(np.sin(psi)) * ds])
 
-    kappa = kappa * (2.0 * np.pi / (np.sum(kappa) * ds))
+    # Close the heading by scaling to a full turn, keeping the direction the
+    # layout was designed in. Forcing +2*pi on a clockwise circuit would flip
+    # every corner's sign and hand back a mirrored track.
+    total_turn = np.sum(kappa) * ds
+    kappa = kappa * (np.sign(total_turn) * 2.0 * np.pi / total_turn)
     coef = np.zeros(2)
     for _ in range(iters):
         res = endpoint(kappa + coef @ basis)
@@ -245,6 +249,44 @@ LAYOUTS: dict[str, list[tuple]] = {
         ("corner", 95, 80), ("straight", 220), ("corner", 35, -70),
         ("straight", 190), ("corner", 80, 90),
     ],
+    # Spa-Francorchamps in character rather than in survey. Built from the
+    # circuit's defining features -- a first-gear hairpin, the long flat-out
+    # Kemmel straight, a fast downhill sweeper, and a stop-start chicane -- at
+    # roughly the real 7 km. The coordinates are not Spa's: this environment has
+    # no network access to fetch a real centreline, and elevation (which is half
+    # of what makes Eau Rouge Eau Rouge) is not modelled at all. Treat it as a
+    # circuit that drives like Spa, not as Spa.
+    "spa": [
+        ("straight", 300),
+        ("corner", 26, -160),    # La Source, first-gear hairpin
+        ("straight", 200),
+        ("corner", 70, 42),      # Eau Rouge, left
+        ("corner", 80, -70),     # Raidillon, right
+        ("corner", 200, -25),
+        ("straight", 2000),      # Kemmel -- flat out, the longest on the calendar
+        ("corner", 44, -85),     # Les Combes
+        ("corner", 40, 60),
+        ("corner", 75, -60),     # Malmedy
+        ("straight", 250),
+        ("corner", 27, -130),    # Rivage
+        ("straight", 120),
+        ("corner", 70, -45),     # Bruxelles
+        ("straight", 350),
+        ("corner", 120, 95),     # Pouhon, long fast left
+        ("straight", 200),
+        ("corner", 52, -75),     # Fagnes
+        ("corner", 56, 55),
+        ("straight", 180),
+        ("corner", 65, -90),     # Stavelot
+        ("straight", 500),
+        ("corner", 140, 45),     # Paul Frere
+        ("straight", 300),
+        ("corner", 230, 55),     # Blanchimont, flat out
+        ("straight", 650),
+        ("corner", 30, -80),     # Bus Stop chicane
+        ("corner", 32, 85),
+        ("straight", 300),
+    ],
     "technical": [
         ("straight", 260), ("corner", 30, 130), ("straight", 90),
         ("corner", 38, -95), ("straight", 140), ("corner", 55, 115),
@@ -290,6 +332,9 @@ def harmonic(
 TRACKS = {
     "oval": oval,
     "national": lambda **kw: from_layout(LAYOUTS["national"], name="national", **kw),
+    "spa": lambda **kw: from_layout(
+        LAYOUTS["spa"], name="spa", **{"half_width": 7.0, **kw}
+    ),
     "gp": lambda **kw: from_layout(LAYOUTS["gp"], name="gp", **kw),
     "technical": lambda **kw: from_layout(LAYOUTS["technical"], name="technical", **kw),
     "harmonic": lambda **kw: harmonic(seed=1, **kw),

@@ -39,6 +39,13 @@ class TrainConfig:
     log_every: int = 1
     objective: str = "reward"          # "reward" or "imitation"
     checkpoint_every: int = 0          # 0 disables; otherwise snapshot theta every N gens
+    # Penalty for descending populations the policy never drives. Reward alone
+    # has no reason to keep the motor bus alive: a readout can meet its target
+    # through one population and let the rest fall silent, which is exactly
+    # what happened before this existed.
+    silence_penalty: float = 4.0
+    silence_floor: float = 0.05        # mean rate a population must reach at some point
+    lap_eval_every: int = 0            # 0 disables true-lap-time tracking
     es: ESConfig = field(default_factory=ESConfig)
 
 
@@ -79,8 +86,18 @@ def _evaluate(args) -> tuple[float, float, float]:
         return -loss, 0.0, 0.0
 
     out = env.rollout(brain, horizon=_W["horizon"], seed=gen_seed)
+    fitness = float(out["return"].mean())
+
+    # Charge for every descending population left unused.
+    if cfg.silence_penalty:
+        unused = sum(
+            max(0.0, 1.0 - peak / cfg.silence_floor)
+            for peak in brain.port_peaks.values()
+        )
+        fitness -= cfg.silence_penalty * unused
+
     laps = float(np.mean(~np.isnan(out["lap_time"])))
-    return float(out["return"].mean()), float(out["progress"].mean()), laps
+    return fitness, float(out["progress"].mean()), laps
 
 
 # ---------------------------------------------------------------------- train
@@ -106,6 +123,7 @@ def train(cfg: TrainConfig, callback=None, theta0: np.ndarray | None = None) -> 
     log: list[dict] = []
     checkpoints: list[dict] = []
     best = {"fitness": -np.inf, "theta": optimizer.theta.copy()}
+    fastest = {"lap": None, "theta": optimizer.theta.copy()}
     started = time.time()
     try:
         for gen in range(cfg.generations):
@@ -132,6 +150,16 @@ def train(cfg: TrainConfig, callback=None, theta0: np.ndarray | None = None) -> 
                 "sigma": optimizer.sigma,
                 "elapsed": time.time() - started,
             }
+
+            # Track the genuinely fastest policy, not just the highest fitness:
+            # fitness is distance in a fixed window, which stops separating
+            # policies once they all survive it.
+            if cfg.lap_eval_every and gen % cfg.lap_eval_every == 0:
+                lap = lap_time_of(optimizer.theta, cfg)
+                row["lap_time"] = lap
+                if lap is not None and (fastest["lap"] is None or lap < fastest["lap"]):
+                    fastest = {"lap": lap, "theta": optimizer.theta.copy()}
+                    row["fastest"] = True
             log.append(row)
             if cfg.checkpoint_every and (
                 gen % cfg.checkpoint_every == 0 or gen == cfg.generations - 1
@@ -152,7 +180,9 @@ def train(cfg: TrainConfig, callback=None, theta0: np.ndarray | None = None) -> 
                     f"gen {gen:3d}  fit {row['fit_mean']:8.1f} (max {row['fit_max']:8.1f})"
                     f"  progress {row['progress_mean']:6.0f} m (max {row['progress_max']:6.0f})"
                     f"  laps {row['lap_frac']:.2f}  sigma {row['sigma']:.3f}"
-                    f"  {row['elapsed']:6.0f}s",
+                    + (f"  LAP {row['lap_time']:.2f}s" if row.get("lap_time") else "")
+                    + (" *best*" if row.get("fastest") else "")
+                    + f"  {row['elapsed']:6.0f}s",
                     flush=True,
                 )
     finally:
@@ -164,10 +194,28 @@ def train(cfg: TrainConfig, callback=None, theta0: np.ndarray | None = None) -> 
         "theta": optimizer.theta,
         "best_theta": best["theta"],
         "best_fitness": best["fitness"],
+        "fastest_theta": fastest["theta"],
+        "fastest_lap": fastest["lap"],
         "log": log,
         "checkpoints": checkpoints,
         "config": cfg,
     }
+
+
+def lap_time_of(theta: np.ndarray, cfg: TrainConfig, n_envs: int = 12) -> float | None:
+    """Best true lap time from the start line, or None if nothing finished.
+
+    Distance under a fixed training horizon is a proxy for speed; this is the
+    quantity actually being chased once the car can get round at all.
+    """
+    brain = build_brain(cfg)
+    brain.set_params(theta)
+    env = make_env(
+        cfg.track, n_envs=n_envs, seed=cfg.seed + 5, max_seconds=400.0, random_start=False
+    )
+    laps = env.rollout(brain, seed=cfg.seed + 5)["lap_time"]
+    done = ~np.isnan(laps)
+    return float(np.nanmin(laps)) if done.any() else None
 
 
 def _closed_loop_progress(theta: np.ndarray, cfg: TrainConfig, seconds: float = 60.0) -> float:
@@ -254,6 +302,8 @@ def train_curriculum(
     return {
         "theta": res["theta"],
         "best_theta": res["best_theta"],
+        "fastest_theta": res.get("fastest_theta", res["best_theta"]),
+        "fastest_lap": res.get("fastest_lap"),
         "stages": stages,
         "checkpoints": checkpoints,
         "config": cfg,

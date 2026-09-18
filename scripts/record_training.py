@@ -11,6 +11,7 @@ Early checkpoints crash at the first corner; late ones complete the lap.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 from pathlib import Path
 
@@ -46,7 +47,7 @@ def replay(theta, conn, track_name, max_frames, stride, seed):
     """Run one attempt and record pose plus neural state."""
     brain = ConnectomeBrain(conn)
     brain.set_params(theta)
-    env = make_env(track_name, n_envs=1, random_start=False, max_seconds=200.0)
+    env = make_env(track_name, n_envs=1, random_start=False, max_seconds=300.0)
     obs = env.reset(seed=seed)
     brain.reset(1)
 
@@ -55,7 +56,7 @@ def replay(theta, conn, track_name, max_frames, stride, seed):
         out[key] = []
 
     step = 0
-    limit = int(200.0 / env.dt)
+    limit = int(300.0 / env.dt)
     while step < limit and len(out["x"]) < max_frames:
         action = brain(obs)
         if step % stride == 0:
@@ -88,18 +89,19 @@ def replay(theta, conn, track_name, max_frames, stride, seed):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--track", default="national")
-    ap.add_argument("--generations", type=int, default=180)
+    ap.add_argument("--track", default="spa")
+    ap.add_argument("--generations", type=int, default=500)
     ap.add_argument("--imitation", type=int, default=50)
-    ap.add_argument("--every", type=int, default=10)
+    ap.add_argument("--every", type=int, default=20)
+    ap.add_argument("--lap-eval-every", type=int, default=25)
     ap.add_argument("--popsize", type=int, default=24)
     ap.add_argument("--envs", type=int, default=20)
     ap.add_argument("--horizon", type=float, default=18.0)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--control", default="none")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--stride", type=int, default=4)
-    ap.add_argument("--max-frames", type=int, default=1100)
+    ap.add_argument("--stride", type=int, default=5)
+    ap.add_argument("--max-frames", type=int, default=2400)
     ap.add_argument("--out", default="training.json")
     args = ap.parse_args()
 
@@ -112,6 +114,7 @@ def main() -> None:
         seed=args.seed,
         log_every=10,
         checkpoint_every=args.every,
+        lap_eval_every=args.lap_eval_every,
         es=ESConfig(popsize=args.popsize, sigma=0.08, lr=0.05, seed=args.seed),
     )
     res = train_curriculum(
@@ -139,7 +142,15 @@ def main() -> None:
         scales[key] = float(max((v.max() for v in vals if v.size), default=1.0)) or 1.0
 
     def quant(arr, scale):
-        return np.clip(np.round(np.asarray(arr) / scale * 100.0), 0, 100).astype(int).tolist()
+        """Quantise to bytes and base64 it.
+
+        Spa laps are three times longer than the old circuit, so the raw JSON
+        numbers would be most of a ten-megabyte page. One byte per neuron per
+        frame, base64-encoded, is about a third of the size and plenty of
+        resolution for a colour ramp.
+        """
+        b = np.clip(np.round(np.asarray(arr) / scale * 100.0), 0, 100).astype(np.uint8)
+        return base64.b64encode(b.tobytes()).decode("ascii")
 
     for r in replays:
         f = r["frames"]
@@ -151,16 +162,16 @@ def main() -> None:
         for key in ("steer", "throttle", "brake"):
             f[key] = np.round(f[key], 3).tolist()
         for key in PER_NEURON:
-            f[key] = [quant(row, scales[key]) for row in f[key]]
+            f[key] = quant(np.asarray(f[key]).ravel(), scales[key])
         for key in MEANS:
             f[key] = quant(f[key], scales[key])
 
     # Reference driver's racing line, for comparison.
-    ref_env = make_env(args.track, n_envs=1, random_start=False, max_seconds=200.0)
+    ref_env = make_env(args.track, n_envs=1, random_start=False, max_seconds=300.0)
     ref_obs = ref_env.reset(seed=args.seed + 1)
     driver = ReferenceDriver(half_width=ref_env.track.half_width)
     line = []
-    for _ in range(int(200.0 / ref_env.dt)):
+    for _ in range(int(300.0 / ref_env.dt)):
         line.append([float(ref_env.state[0, 0]), float(ref_env.state[0, 1])])
         ref_obs, _r, _d, _i = ref_env.step(driver(ref_obs))
         if not ref_env.alive.any():
@@ -195,6 +206,14 @@ def main() -> None:
             "per_neuron": list(PER_NEURON),
             "means": list(MEANS),
         },
+        "widths": {"epg": 16, "fc2": 16, "pfl3l": 16, "pfl3r": 16, "d7": 8},
+        "encoding": "base64-uint8, 0-100, row-major (frame, neuron)",
+        "fastest_lap": res.get("fastest_lap"),
+        "lap_curve": [
+            {"gen": r["gen"], "lap": r["lap_time"]}
+            for st in res["stages"] if "log" in st
+            for r in st["log"] if r.get("lap_time")
+        ],
     }
     Path(args.out).write_text(json.dumps(payload, separators=(",", ":")))
     print(f"\nwrote {args.out} ({Path(args.out).stat().st_size/1e6:.2f} MB)")

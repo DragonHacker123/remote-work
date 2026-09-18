@@ -108,6 +108,11 @@ def test_threshold_bias_is_what_creates_the_signal():
 
     This is the single most important initialisation constant in the model, so
     it gets a test that fails loudly if someone 'tidies it up'.
+
+    The margin is 10x rather than the 450x a hard max(x, 0) gave: the rectifier
+    is now a softplus, which keeps a slope below threshold so that descending
+    populations cannot switch off permanently. That softening costs some of the
+    threshold contrast, and this is where the cost shows up.
     """
     conn = driving_subgraph(build_surrogate(scale=0.5, seed=0))
     brain = ConnectomeBrain(conn)
@@ -127,4 +132,4 @@ def test_threshold_bias_is_what_creates_the_signal():
         mid = len(errors) // 2
         return abs((diff[mid + 1] - diff[mid - 1]) / (errors[mid + 1] - errors[mid - 1]))
 
-    assert slope_at_zero(THRESHOLD_BIAS) > 20 * slope_at_zero(+0.05)
+    assert slope_at_zero(THRESHOLD_BIAS) > 10 * slope_at_zero(+0.05)
