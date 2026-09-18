@@ -271,7 +271,22 @@ output and pushes back through a normal virtual controller — nothing is
 injected into the process — but driving an online session with synthetic input
 is not what anti-cheat expects, and this project does not need it.
 
-## Three things that turned out to matter
+## Watching it learn
+
+```bash
+python scripts/record_training.py --out training.json   # trains, then replays every checkpoint
+python scripts/build_viz.py training.json viz/index.html
+```
+
+Produces a single self-contained page: the car's attempts getting further across
+26 checkpoints, with the central complex drawn live beside them — the EPG
+compass ring, the FC2 goal ring, the two PFL3 populations reading the compass at
+opposite shifts, and the premotor and descending neurons they drive. Population
+activity is normalised against its maximum across the whole run rather than per
+checkpoint, so activity organising over training is visible instead of being
+rescaled away. That is what surfaced the dead-motor-channel finding below.
+
+## Four things that turned out to matter
 
 Recorded because each cost real debugging time and each is easy to get wrong
 again.
@@ -288,6 +303,18 @@ nothing in closed loop until this was fixed. `THRESHOLD_BIAS` has a test.
 costs the rear axle ~20% of its lateral grip at speed and produces
 inexplicable snap oversteer at every corner entry. Braking is front-biased and
 must not be charged wholly to the rear either. Both have regression tests.
+
+**Training abandons the biological motor readout, and nothing stops it.** The
+decoder is initialised to the fly's own convention — the left–right difference
+across DNa02 steers, DNa01 sets speed, DNp09 stops. In the trained network
+DNa02 and DNa01 **never fire at all**: ES drove them below threshold, and the
+car is steered entirely through DNp09 plus a constant offset. Twelve of sixty
+descending neurons carry everything. The central complex upstream still
+computes the heading error correctly, so the circuit that matters survives, but
+the motor bus collapses to one channel because nothing in the objective values
+using it. Visible in the visualiser by scrubbing from the first checkpoint to
+the last. The obvious fix — a leaky rate nonlinearity, or a penalty on dead
+populations — needs a retrain and has not been done.
 
 **A circuit needs a spread of corner speeds.** With realistic downforce
 anything above roughly a 150 m radius is flat out, so procedurally-generated

@@ -310,7 +310,7 @@ function buildBrain() {
     const row = document.createElement("div"); row.className = "meter";
     row.innerHTML = `<span class="k">${label}</span><span class="bar"><i></i></span><span class="v">0</span>`;
     box.appendChild(row);
-    meterEls[key] = {fill: row.querySelector("i"), val: row.querySelector(".v"), color};
+    meterEls[key] = {fill: row.querySelector("i"), val: row.querySelector(".v"), row, color};
     meterEls[key].fill.style.background = color;
   }
 }
@@ -318,6 +318,18 @@ function buildBrain() {
 /* Distance actually travelled along the recorded trajectory, rather than a
    share of the final figure -- the car does not cover ground at a constant
    rate, so the pro-rata version reads wrong exactly where it matters. */
+/* Peak activity of a population within one checkpoint, so a channel that
+   training has driven silent can be shown as silent rather than as zero. */
+const maxCache = {};
+function ckMax(ck, key) {
+  const id = ck + "/" + key;
+  if (!(id in maxCache)) {
+    const v = DATA.checkpoints[ck].frames[key];
+    maxCache[id] = v && v.length ? Math.max(...v) : 0;
+  }
+  return maxCache[id];
+}
+
 const distCache = {};
 function distanceTo(ck, i) {
   if (!distCache[ck]) {
@@ -455,8 +467,13 @@ function render() {
 
   for (const [key] of METERS) {
     const v = f[key][i] || 0;
+    const silent = (ckMax(S.ck, key) === 0);
     meterEls[key].fill.style.width = v + "%";
-    meterEls[key].val.textContent = Math.round(v);
+    meterEls[key].val.textContent = silent ? "—" : Math.round(v);
+    meterEls[key].val.style.color = silent ? "#4a5866" : "";
+    meterEls[key].row.title = silent
+      ? "silent at this checkpoint — training drove this population below threshold"
+      : "";
   }
 
   const steer = f.steer[i] || 0;
@@ -484,20 +501,42 @@ function render() {
   drawCurve();
 }
 
+function bestCheckpoint() {
+  let best = 0, bestKey = [-1, -Infinity];
+  DATA.checkpoints.forEach((ck, i) => {
+    const key = [ck.lap_time ? 1 : 0, ck.lap_time ? -ck.lap_time : ck.progress];
+    if (key[0] > bestKey[0] || (key[0] === bestKey[0] && key[1] > bestKey[1])) {
+      best = i; bestKey = key;
+    }
+  });
+  return best;
+}
+
 function explain() {
-  const last = DATA.checkpoints[DATA.checkpoints.length - 1];
+  const best = DATA.checkpoints[bestCheckpoint()];
   $("explain").innerHTML =
-    `<b>What you are looking at.</b> The two rings are the fly's central complex: EPG holds a
-     bump of activity at the car's compass heading, FC2 holds one at the direction the racing
+    `<b>What you are looking at.</b> The two rings are the fly's central complex. EPG holds a
+     bump of activity at the car's compass heading; FC2 holds one at the direction the racing
      line wants. The PFL3 rows read the compass with equal and opposite 90° shifts, so the
-     difference between their two population sums is a signed steering error — that is the
-     steering controller, and it comes from the wiring, not from training. Δ7 is the inhibition
-     that keeps the compass bump single. Everything below is premotor: LAL crosses to the
-     opposite side, DNa02 turns, DNa01 drives forward, DNp09 stops.` +
-    (last.lap_time
-      ? ` The final checkpoint laps in ${last.lap_time}s against the classical reference driver's
-          ${DATA.reference.lap_time}s.`
-      : "");
+     difference between their two population sums is a signed steering error. That is a
+     steering controller, and it comes from the wiring rather than from training — the
+     connectivity is never altered here. Δ7 is the inhibition that keeps the compass bump
+     single. Below them sit the premotor populations: LAL, then the descending neurons that
+     carry commands to the body.` +
+    (best.lap_time
+      ? ` The best checkpoint laps in ${best.lap_time}s against the classical reference
+          driver's ${DATA.reference.lap_time}s. Later checkpoints wander, because evolution
+          strategies follow a population mean that keeps moving after it first finds a lap.`
+      : "") +
+    `<br><br><b>Something the training did that we did not ask for.</b> Scrub from the first
+     checkpoint to the last and watch <em>DNa02</em> and <em>DNa01</em>. They start active —
+     the readout was initialised to the fly's own convention, where the left–right difference
+     across DNa02 steers and DNa01 sets speed — and training switches them off entirely. In the
+     lapping network they never fire. The car is steered through DNp09, nominally the
+     <em>stop</em> channel, plus a constant offset. Evolution was given a motor bus of 60
+     descending neurons and chose to drive through 12 of them. The central complex upstream
+     still computes the heading error correctly; it is the readout that abandoned the
+     biological convention, and nothing in the objective asked it not to.`;
 }
 
 /* ------------------------------------------------------------ playback */
@@ -559,9 +598,11 @@ function boot() {
   $("rate").onchange = e => { S.rate = +e.target.value; };
   window.addEventListener("resize", () => { drawCurve(); });
 
-  // Open on the finished article, part-way round, so the first still frame
-  // shows the circuit working rather than an empty grid.
-  S.ck = DATA.checkpoints.length - 1;
+  // Open on the best attempt, part-way round, so the first still frame shows
+  // the circuit working rather than an empty grid. Deliberately not the last
+  // checkpoint: evolution strategies track a population mean, and it keeps
+  // wandering after it first learns to complete a lap.
+  S.ck = bestCheckpoint();
   S.frame = Math.floor(frameCount() * 0.42);
   explain();
   render();
