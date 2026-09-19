@@ -414,6 +414,9 @@ function buildRoad(W, H) {
   const xy = DATA.track.xy, z = DATA.track.z;
   const lo = z ? Math.min(...z) : 0, hi = z ? Math.max(...z) : 1;
   const relief = z && hi - lo > 5;
+  // A 10 m road on a 7 km circuit is under a pixel wide at this scale, which
+  // reads as a wire rather than as somewhere a car goes. Floor it.
+  const road = Math.max(3.5, DATA.track.half_width * 2 * s);
   g.lineJoin = "round"; g.lineCap = "round";
 
   if (relief) {
@@ -422,7 +425,7 @@ function buildRoad(W, H) {
       const j = (i + 1) % xy.length;
       const [x0, y0] = P(xy[i][0], xy[i][1]), [x1, y1] = P(xy[j][0], xy[j][1]);
       g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1);
-      g.lineWidth = DATA.track.half_width * 2 * s;
+      g.lineWidth = road;
       g.strokeStyle = heightColor((z[i] - lo) / (hi - lo));
       g.stroke();
     }
@@ -430,7 +433,7 @@ function buildRoad(W, H) {
     g.beginPath();
     xy.forEach((p, i) => { const [X, Y] = P(p[0], p[1]); i ? g.lineTo(X, Y) : g.moveTo(X, Y); });
     g.closePath();
-    g.lineWidth = DATA.track.half_width * 2 * s; g.strokeStyle = "#242e38"; g.stroke();
+    g.lineWidth = road; g.strokeStyle = "#242e38"; g.stroke();
   }
 
   // Racing line the road was built around, hairline down the middle.
@@ -568,11 +571,12 @@ function drawRelief(distance) {
   g.lineWidth = 1.5; g.strokeStyle = "#e8fffb"; g.stroke();
 
   g.font = "11px " + getComputedStyle(document.body).getPropertyValue("--mono");
-  g.fillStyle = "#6b7a88";
+  g.fillStyle = "#93a3b1";
   g.fillText(`${Math.round(lo)}–${Math.round(hi)} m · ${Math.round(hi - lo)} m of climb per lap`, 6, H - 3);
   g.textAlign = "right";
-  g.fillStyle = "#f2a73b"; g.fillText("climb >6%", W - 74, H - 3);
-  g.fillStyle = "#4fd6c8"; g.fillText("descent >6%", W - 6, H - 3);
+  const down = "descent >6%";
+  g.fillStyle = "#4fd6c8"; g.fillText(down, W - 6, H - 3);
+  g.fillStyle = "#f2a73b"; g.fillText("climb >6%", W - 18 - g.measureText(down).width, H - 3);
   g.textAlign = "left";
 }
 
@@ -695,8 +699,8 @@ function explain() {
   const climb = z.length ? Math.round(Math.max(...z) - Math.min(...z)) : 0;
 
   const relief = climb > 5
-    ? `<br><br><b>Why the circuit is shaded.</b> This is the surveyed
-       ${DATA.track.name === "spa" ? "Spa-Francorchamps" : DATA.track.name} centreline with
+    ? `<br><br><b>Why the circuit is shaded.</b> This is
+       ${DATA.track.name === "spa" ? "Spa-Francorchamps" : DATA.track.name}, surveyed, with
        real terrain on it — ${climb} m of elevation change per lap — and the height is in the
        physics, not just the picture. Gravity acts along the road, so the climb out of Eau
        Rouge costs about a tenth of the drive force and the run down to Stavelot hands it
