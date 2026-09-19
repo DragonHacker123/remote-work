@@ -20,8 +20,13 @@ blunt about which one this is.
 In (2) the connectivity matrix is **fixed and never trained**. What is learned
 is small and biologically shaped: one output gain, one time constant and one
 resting drive per *cell type*; a sensory encoder; and a linear readout from the
-descending neurons. About 1,800 parameters over a 846-neuron, 16k-synapse
-driving network — roughly two parameters per neuron, none of them a synapse.
+descending neurons. About 2,400 parameters over a 846-neuron, 16k-synapse
+driving network — roughly three parameters per neuron, none of them a synapse.
+
+The circuit it drives is the real Spa-Francorchamps, with real terrain: 6,928 m
+and 106 m of elevation change, from a surveyed centreline georeferenced against
+OpenStreetMap so SRTM height data can be sampled along it. Gradient and vertical
+curvature are in the physics, not the scenery — see *Elevation* below.
 
 ## Why the fly, specifically
 
@@ -64,15 +69,84 @@ answer would be the whole trick.
 
 ```bash
 pip install -e ".[dev]"
-pytest -m "not slow"                    # 59 tests, ~35 s
+pytest -m "not slow"                    # 67 tests, ~35 s
 pytest                                  # adds 2 end-to-end runs, several minutes
 
 flydrive info                           # connectome and track summary
-flydrive reference --track national      # classical driver's lap time
+flydrive reference --track spa          # classical driver's lap time
 flydrive probe-cx                       # the steering circuit, as above
-flydrive train --track national --generations 200 --out theta.npz
-flydrive session --theta theta.npz       # multi-lap MB plasticity session
+flydrive train --track spa --generations 900 --out theta.npz
+flydrive session --theta theta.npz      # multi-lap MB plasticity session
 ```
+
+Spa ships in the repo as `flydrive/sim/data/spa.npz`. To rebuild it from the
+public sources:
+
+```bash
+$ python scripts/fetch_spa.py --out flydrive/sim/data/spa.npz
+$ flydrive info | tail -4
+  spa              6928 m  min radius    16 m  climb  106 m  gradient -11%..+15%
+```
+
+## The circuit
+
+Three sources, none of which has everything:
+
+| source | gives | missing |
+| --- | --- | --- |
+| [TUM racetrack-database](https://github.com/TUMFTM/racetrack-database) | surveyed centreline at ~5 m spacing, measured left and right track widths | no georeference at all |
+| [bacinger/f1-circuits](https://github.com/bacinger/f1-circuits) | the circuit in WGS84, from OpenStreetMap | only ~150 points |
+| AWS terrain tiles | SRTM 1-arcsecond elevation | needs lat/lon |
+
+So `scripts/fetch_spa.py` aligns the TUM geometry onto the OSM one — a Umeyama
+similarity fit, searched over cyclic shift and direction, which lands at 12 m
+mean error — converts the aligned points back to lat/lon and samples SRTM there.
+The result keeps TUM's resolution and widths and gains real height: 363–469 m,
++15.0% at its steepest (Raidillon), −10.7% at its steepest descent.
+
+### Elevation
+
+Not decoration. Two terms:
+
+- **Gravity along the road**, `−m g sin θ`. The climb out of Eau Rouge costs
+  about a tenth of the available drive force; the drop to Stavelot hands it
+  back, and a driver who ignores it arrives at the corner too fast.
+- **Vertical curvature**, which scales tyre load by `cos θ + v² κ_v / g`. The
+  compression at the bottom of Eau Rouge is worth most of an extra g; the crest
+  at the top of the Kemmel climb takes grip away exactly where the car is
+  braking for Les Combes.
+
+Both are in the observation vector *and* in the reference driver's backward
+speed-profile pass, so the classical driver brakes earlier downhill without
+being told to.
+
+### The racing line
+
+The surveyed centreline is not driveable. Its tightest radius is 10.0 m at the
+Bus Stop and 13.8 m at La Source; a real driver opens both out across the full
+width of the road. So the path everything is measured against is a
+**minimum-curvature racing line** solved through the corridor, which lifts the
+tightest radius on the lap to 15.8 m:
+
+| corner | centreline | racing line |
+| --- | --- | --- |
+| La Source | 13.8 m | 21.3 m |
+| Eau Rouge | 153.4 m | 200.6 m |
+| Les Combes | 28.5 m | 53.9 m |
+| Pouhon | 70.8 m | 82.9 m |
+| Stavelot | 30.2 m | 55.0 m |
+| Bus Stop | 10.0 m | 15.8 m |
+
+Offsets along the track normal make the path's second difference affine in the
+offset, so this is a convex box-constrained QP, solved with an active set
+rather than by clipping an unconstrained solve. Two details decide whether it
+produces a racing line or noise, and both are written up under *Things that
+turned out to matter* below.
+
+Room either side of that line is asymmetric — at an apex there are a few
+centimetres on the inside and ten metres on the outside — so the track carries
+`hw_left` and `hw_right`, and going off is measured in metres past the white
+line rather than as a multiple of the room available.
 
 ## How it is trained
 
@@ -91,6 +165,17 @@ climb.
 3. **ES on driving reward** over a fixed horizon. With the horizon fixed,
    maximising progress *is* lap-time optimisation. Only this stage can beat the
    teacher, because only here is the objective speed rather than similarity.
+
+Two things are bolted onto stage 3 so that "it completes a lap" is not where
+training stops:
+
+- A **true lap time** is measured from the start line every 25 generations and
+  the fastest parameters are kept separately from the highest-fitness ones.
+  Fixed-horizon distance stops separating policies once they all survive the
+  window; lap time does not.
+- A **silence penalty** charges the fitness for every descending population the
+  policy leaves unused, because reward alone has no reason to keep the fly's
+  motor bus alive. See *Things that turned out to matter*.
 
 Stages 1–3 are phylogeny: they tune what the animal is born with. The mushroom
 body is ontogeny — see below.
@@ -116,14 +201,24 @@ judged against:
 
 | circuit | length | reference lap | average |
 | --- | --- | --- | --- |
-| oval | 2142 m | 29.90 s | 258 km/h |
-| national | 2757 m | 54.88 s | 181 km/h |
-| gp | 4457 m | 71.90 s | 223 km/h |
-| technical | 2236 m | 56.00 s | 144 km/h |
+| **spa** (surveyed, with elevation) | **6928 m** | **118.22 s** | **211 km/h** |
+| oval | 2142 m | 29.56 s | 261 km/h |
+| national | 2757 m | 54.50 s | 182 km/h |
+| gp | 4457 m | 71.10 s | 226 km/h |
+| technical | 2236 m | 55.62 s | 145 km/h |
 
-**Driving.** After the three-stage curriculum (50 imitation + 180 reward
-generations, ~50 min on 4 cores), the connectome brain completes laps of
-`national`:
+A real Spa qualifying lap is about 101 s, so a controller built from nothing but
+textbook vehicle dynamics is roughly 17% off the pace of a Formula 1 driver in a
+car it is only approximately modelling. That is the right order of magnitude to
+make the comparison mean something.
+
+**Driving.** The numbers below are from the **`national`** run, before the move
+to surveyed Spa. Spa is a harder circuit — two and a half times the length, a
+15.8 m hairpin, 106 m of elevation — and the results of training on it are not
+in this table yet.
+
+After the three-stage curriculum (50 imitation + 180 reward generations, ~50 min
+on 4 cores), the connectome brain completes laps of `national`:
 
 | driver | laps completed | best lap | average speed |
 | --- | --- | --- | --- |
@@ -139,8 +234,8 @@ look like from this table alone.
 
 **Central complex.** `PFL3R − PFL3L` versus heading error: r = −0.99 against a
 sine, steepest at zero error, corrective sign, and invariant to absolute
-heading. In closed loop while driving, the PFL3 difference tracks heading error
-at r = 0.88.
+heading. In closed loop while driving on `national`, the PFL3 difference tracks
+heading error at r = 0.88.
 
 **Mushroom body.** 16 laps of `national` with inherited parameters frozen:
 
@@ -181,7 +276,9 @@ test suite, not assumed.
 
 ### What it showed
 
-Identical pipeline, identical budget, identical seed — only the wiring differs:
+Identical pipeline, identical budget, identical seed — only the wiring differs.
+**Measured on `national`**, before the move to surveyed Spa; it has not been
+repeated on the harder circuit:
 
 | | real connectome | within-type shuffle |
 | --- | --- | --- |
@@ -279,17 +376,55 @@ python scripts/build_viz.py training.json viz/index.html
 ```
 
 Produces a single self-contained page: the car's attempts getting further across
-26 checkpoints, with the central complex drawn live beside them — the EPG
+every checkpoint, with the central complex drawn live beside them — the EPG
 compass ring, the FC2 goal ring, the two PFL3 populations reading the compass at
-opposite shifts, and the premotor and descending neurons they drive. Population
-activity is normalised against its maximum across the whole run rather than per
-checkpoint, so activity organising over training is visible instead of being
-rescaled away. That is what surfaced the dead-motor-channel finding below.
+opposite shifts, and the premotor and descending neurons they drive. The circuit
+is shaded by altitude and there is an elevation profile under it with the car's
+position marked, because a plan view of Spa cannot show the 106 m that make it
+Spa.
 
-## Four things that turned out to matter
+Population activity is normalised against its maximum across the **whole run**
+rather than per checkpoint, so activity organising over training is visible
+instead of being rescaled away. That is what surfaced the dead-motor-channel
+finding below — and the page's closing paragraph is now computed from the trace
+rather than written by hand, so it reports what this run did instead of what the
+last one did.
+
+## Things that turned out to matter
 
 Recorded because each cost real debugging time and each is easy to get wrong
 again.
+
+**A ridge term can delete the answer while looking harmless.** The
+minimum-curvature solver regularises a second-difference operator whose small
+eigenvalues go as `(2π/λ)⁴` for a feature of wavelength λ. At 1 m sampling a
+ridge of `1e-6` suppresses everything longer than about 130 m — which is the
+entire length scale a racing line works on. The first version returned offsets
+of a few centimetres and looked, plausibly, like "the centreline is already
+optimal". The ridge now exists only to make the factorisation safe and is
+`1e-9`.
+
+**Minimising curvature in index space rewards cheating.** Summing squared second
+differences over the *centreline index* is `∫ κ² h³ ds` for a local spacing `h`.
+Pulling the line onto the inside of a corner shrinks `h`, so the solver could
+lower its objective while making the corner physically tighter — La Source went
+from 14.6 m to 9.4 m, the exact opposite of the intent. Reweighting by `1/h³`
+from the previous iterate restores the real integral. And `∫κ²` is a lap-length
+average that will spend a hairpin to buy back a little on the sweepers, so the
+objective is raised to the fourth power by iteratively reweighted least squares.
+That reweighting is a fixed point rather than a descent and can cycle, so every
+iterate is scored on peak curvature and the best is kept — with the centreline
+in the running, which means the routine can decline to produce a line at all.
+
+**Pedal travel is not a force.** The reference driver's friction ellipse
+compared brake *pedal* against a grip *fraction*. Full brake is 32 kN, about
+twice what the tyres can transmit at 35 m/s, so `brake ≤ 0.78` still permitted a
+demand well past the limit. Worse, it checked the car as a whole, when what
+actually lets go on corner entry is the rear axle by itself: it carries the
+smaller share of the weight and braking transfers load *off* it. Because the
+available load depends on the force being solved for, the rear ellipse is a
+quadratic in brake force. Before this fix the reference driver retired at La
+Source on every single lap; after it, 117.30 s and a lap everywhere else too.
 
 **PFL3 must sit near threshold.** Its steering signal is the difference of two
 *rectified* population sums. Let every wedge float above threshold and the sum
@@ -304,23 +439,27 @@ costs the rear axle ~20% of its lateral grip at speed and produces
 inexplicable snap oversteer at every corner entry. Braking is front-biased and
 must not be charged wholly to the rear either. Both have regression tests.
 
-**Training abandons the biological motor readout, and nothing stops it.** The
-decoder is initialised to the fly's own convention — the left–right difference
-across DNa02 steers, DNa01 sets speed, DNp09 stops. In the trained network
-DNa02 and DNa01 **never fire at all**: ES drove them below threshold, and the
-car is steered entirely through DNp09 plus a constant offset. Twelve of sixty
-descending neurons carry everything. The central complex upstream still
-computes the heading error correctly, so the circuit that matters survives, but
-the motor bus collapses to one channel because nothing in the objective values
-using it. Visible in the visualiser by scrubbing from the first checkpoint to
-the last. The obvious fix — a leaky rate nonlinearity, or a penalty on dead
-populations — needs a retrain and has not been done.
+**Training will abandon the biological motor readout unless you pay it not
+to.** The decoder is initialised to the fly's own convention — the left–right
+difference across DNa02 steers, DNa01 sets speed, DNp09 stops. An earlier run
+ended with DNa02 and DNa01 **never firing at all**: ES drove them below a hard
+rectifier and steered the car entirely through DNp09, nominally the *stop*
+channel, plus a constant offset. Twelve of sixty descending neurons carried
+everything. The central complex upstream still computed heading error
+correctly, so the circuit that matters survived, but the motor bus collapsed to
+one channel because nothing in the objective valued using it. Two changes: a
+softplus rate law so a population below threshold still has a gradient, and an
+explicit penalty on descending populations the policy never drives. The
+visualiser now reports each channel's peak rate at the first checkpoint versus
+the best one and says which verdict the data supports, rather than restating
+last run's.
 
 **A circuit needs a spread of corner speeds.** With realistic downforce
 anything above roughly a 150 m radius is flat out, so procedurally-generated
 "interesting" layouts came out as one hard corner and 3 km of full throttle —
-which is not a driving task. Tracks are built from explicit corner sequences in
-the 25–120 m radius band instead.
+which is not a driving task. Synthetic tracks are built from explicit corner
+sequences in the 25–120 m radius band instead. Real Spa needs no such help: it
+spans a 15.8 m hairpin and a 2 km flat-out straight.
 
 ## Layout
 
@@ -328,13 +467,18 @@ the 25–120 m radius band instead.
 flydrive/
   connectome/   schema (signed sparse, per-type parameter sharing), FlyWire
                 loader, surrogate builder, null models
-  sim/          track geometry, dynamic bicycle model with Pacejka tyres and
-                downforce, vectorised env, the shared observation contract
+  sim/          track geometry with elevation and the racing-line solver,
+                dynamic bicycle model with Pacejka tyres, downforce and road
+                gradient, vectorised env, the shared observation contract
+  sim/data/     spa.npz -- the surveyed circuit, built by scripts/fetch_spa.py
   agents/       classical reference driver, connectome-constrained rate network
   learn/        ES, distillation, three-stage curriculum, MB plasticity
   bridge/       F1 25 UDP telemetry, virtual gamepad, live loop
-scripts/        run_experiment.py -- real connectome vs shuffled control
-tests/          61 tests; the central-complex ones are the load-bearing ones
+scripts/        fetch_spa.py       -- build the circuit from public sources
+                run_experiment.py  -- real connectome vs shuffled control
+                record_training.py -- train, then replay every checkpoint
+                build_viz.py       -- inline a trace into the visualiser
+tests/          67 tests; the central-complex ones are the load-bearing ones
 ```
 
 ## Limitations
@@ -347,9 +491,18 @@ tests/          61 tests; the central-complex ones are the load-bearing ones
   preview; those channels are engineering, not biology, and they are where a
   sceptic should look first.
 - The bridge has never seen the real game.
-- The brain laps 1.5x slower than a classical controller. That gap is the
-  headline open problem, and the training budget here (180 reward generations
-  on four cores) is small enough that it is not yet evidence of a ceiling.
+- The car is an F1 car in the way a bicycle model with one Pacejka curve per
+  axle is: understeer, load transfer, downforce and a friction ellipse are
+  there; tyre temperature, suspension, differential and DRS are not.
+- Spa's elevation is SRTM at 30 m horizontal resolution, smoothed along the
+  lap. It gets Eau Rouge and the Kemmel climb right; it is not a survey of the
+  kerbs, and camber is not modelled at all.
+- The racing line is minimum-curvature, not minimum-lap-time. A real optimal
+  line trades curvature against where the car can use its power, which needs
+  the vehicle model inside the optimisation.
+- The brain laps slower than a classical controller. That gap is the headline
+  open problem, and the training budget here is small enough that it is not yet
+  evidence of a ceiling.
 - Mushroom-body sessions run many cars sharing one set of KC→MBON weights.
   That multiplies the learning signal per lap and is a convenience, not a
   claim about flies.

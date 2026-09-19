@@ -153,10 +153,17 @@ def cmd_session(args) -> int:
     from .learn.mb import MBConfig, MushroomBody, run_learning_session
     from .sim import make_env
 
+    from .sim import get_track
+
     conn = build_surrogate()
+    # Budget by circuit length, not a flat 90 s a lap: that was enough for a
+    # 2.7 km layout and cuts a Spa lap off half way round. 25 m/s is a slow but
+    # plausible floor for a policy that can get round at all.
+    track = get_track(args.track)
     env = make_env(
         args.track, n_envs=args.envs, random_start=False,
-        max_seconds=args.laps * 90.0, target_laps=args.laps + 1,
+        max_seconds=args.laps * max(90.0, track.length / 25.0),
+        target_laps=args.laps + 1,
     )
     if args.theta:
         from .agents.net import ConnectomeBrain, driving_subgraph
