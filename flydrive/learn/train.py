@@ -49,6 +49,29 @@ class TrainConfig:
     es: ESConfig = field(default_factory=ESConfig)
 
 
+# Stage 3 runs in segments of growing horizon: (multiple of
+# ``cfg.horizon_seconds``, share of the generation budget).
+#
+# A fixed short horizon does not select for surviving a long circuit. On Spa a
+# lap is ~118 s, so an 18 s window is 15% of one: a car that crashes at 17 s
+# scores almost as well as one that survives, and the objective cannot tell
+# them apart. Measured over 400 generations at a fixed 18 s, the gap between
+# progress reward and fitness -- which is the crash penalty being charged --
+# started at 37 and was still 23 at the end. Essentially every car was still
+# crashing inside the window, and more generations were not fixing it.
+#
+# Growing the horizon fixes it the cheap way round: early generations stay
+# short, so the dense early signal costs little, and the expensive long windows
+# are only paid for once there is a policy worth measuring over them. The
+# shares are weighted against cost, since a generation costs what its horizon
+# costs.
+REWARD_HORIZONS: tuple[tuple[float, float], ...] = (
+    (1.0, 0.5),      # 18 s -- learn to corner at all
+    (2.0, 0.3),      # 36 s -- string corners together
+    (3.5, 0.2),      # 63 s -- half a lap; survival starts to dominate
+)
+
+
 def build_brain(cfg: TrainConfig) -> ConnectomeBrain:
     """Construct the driving network, optionally over a shuffled connectome."""
     conn = build_surrogate(scale=cfg.scale, seed=cfg.connectome_seed)
@@ -241,9 +264,10 @@ def train_curriculum(
        linearly available in the motor bus at all.
     2. ES on imitation loss. Dense signal, and unlike step 1 it can reshape the
        sensory encoder -- which is what actually limits steering accuracy.
-    3. ES on driving reward over a fixed horizon, which is lap-time
-       optimisation. Only this stage can beat the teacher, because only here is
-       the objective speed rather than similarity.
+    3. ES on driving reward, which is lap-time optimisation. Only this stage can
+       beat the teacher, because only here is the objective speed rather than
+       similarity. It runs in segments of growing horizon -- see
+       ``REWARD_HORIZONS`` for why a fixed short one cannot get round Spa.
     """
     brain = build_brain(cfg)
     env = make_env(
@@ -292,18 +316,58 @@ def train_curriculum(
             print(f"[2/3] readout refit {verdict}: {drove_before:.0f} m -> "
                   f"{drove_after:.0f} m, {fit2['r2_steer']:.3f} steer R^2", flush=True)
 
-    res = train(
-        replace(cfg, objective="reward", generations=reward_generations),
-        callback=callback,
-        theta0=theta,
-    )
-    stages.append({"stage": "reward", "log": res["log"]})
-    checkpoints.extend(res["checkpoints"])
+    # Stage 3, run in segments of growing horizon. See REWARD_HORIZONS.
+    fractions = np.asarray([w for _m, w in REWARD_HORIZONS], dtype=float)
+    split = np.maximum(np.round(fractions / fractions.sum() * reward_generations), 1)
+    reward_log: list[dict] = []
+    best = {"fitness": -np.inf, "theta": theta.copy()}
+    fastest = {"lap": None, "theta": theta.copy()}
+    offset = 0
+
+    sigma = cfg.es.sigma
+    for (mult, _w), gens in zip(REWARD_HORIZONS, split.astype(int)):
+        horizon = cfg.horizon_seconds * mult
+        # Carry the annealed search radius across the segment boundary. Each
+        # train() call builds its own optimiser, so without this the third
+        # segment would go back to exploring as widely as the first did.
+        rcfg = replace(
+            cfg, objective="reward", generations=int(gens), horizon_seconds=horizon,
+            es=replace(cfg.es, sigma=sigma),
+        )
+        if cfg.log_every:
+            print(f"[3/3] reward, {int(gens)} generations at a {horizon:.0f} s "
+                  f"horizon ({horizon / 118.0 * 100:.0f}% of a Spa lap)", flush=True)
+        res = train(rcfg, callback=callback, theta0=theta)
+        theta = res["theta"]
+        if res["log"]:
+            sigma = res["log"][-1]["sigma"]
+
+        # Gen numbers restart per segment; offset them so the training curve
+        # the visualiser draws is one monotone axis.
+        for row in res["log"]:
+            row["gen"] += offset
+            row["horizon"] = horizon
+        for ck in res["checkpoints"]:
+            ck["gen"] += offset
+            ck["horizon"] = horizon
+        reward_log.extend(res["log"])
+        checkpoints.extend(res["checkpoints"])
+        offset += int(gens)
+
+        # Fitness is not comparable across horizons -- a longer window simply
+        # scores more distance -- so only the lap time carries across segments.
+        best = {"fitness": res["best_fitness"], "theta": res["best_theta"]}
+        if res.get("fastest_lap") is not None and (
+            fastest["lap"] is None or res["fastest_lap"] < fastest["lap"]
+        ):
+            fastest = {"lap": res["fastest_lap"], "theta": res["fastest_theta"]}
+
+    stages.append({"stage": "reward", "log": reward_log})
     return {
-        "theta": res["theta"],
-        "best_theta": res["best_theta"],
-        "fastest_theta": res.get("fastest_theta", res["best_theta"]),
-        "fastest_lap": res.get("fastest_lap"),
+        "theta": theta,
+        "best_theta": best["theta"],
+        "fastest_theta": fastest["theta"] if fastest["lap"] is not None else best["theta"],
+        "fastest_lap": fastest["lap"],
         "stages": stages,
         "checkpoints": checkpoints,
         "config": cfg,
