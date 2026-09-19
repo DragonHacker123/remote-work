@@ -3,7 +3,14 @@ import pytest
 
 from flydrive.agents.classical import ReferenceDriver, corner_speed
 from flydrive.sim import get_track, make_env
-from flydrive.sim.track import TRACKS, from_layout
+from flydrive.sim.track import (
+    TRACKS,
+    Track,
+    from_layout,
+    racing_line_offsets,
+    ring_curvature,
+    ring_normals,
+)
 from flydrive.sim.vehicle import G, VehicleParams, step_dynamics
 
 
@@ -43,6 +50,84 @@ def test_layout_produces_a_spread_of_corner_speeds():
     v = np.minimum(corner_speed(track.kappa, VehicleParams()), 92.0)
     assert v.min() < 35.0, "no slow corners"
     assert np.mean(v >= 91.0) < 0.9, "almost everything is flat out"
+
+
+# --------------------------------------------------------------- racing line
+
+
+def _corridor(radius, half_width, n=900):
+    """A closed circle plus the room either side of it."""
+    th = np.linspace(0.0, 2.0 * np.pi, n, endpoint=False)
+    xy = np.stack([radius * np.cos(th), radius * np.sin(th)], axis=1)
+    side = np.full(n, half_width)
+    return xy, side
+
+
+def test_racing_line_stays_inside_the_corridor():
+    xy, side = _corridor(120.0, 5.0)
+    alpha = racing_line_offsets(xy, side, side, margin=0.6)
+    assert alpha.max() <= 5.0 - 0.6 + 1e-6
+    assert alpha.min() >= -(5.0 - 0.6) - 1e-6
+
+
+def test_racing_line_respects_asymmetric_room():
+    """Bounds are per side, so a one-sided corridor must stay one-sided."""
+    xy, _ = _corridor(120.0, 5.0)
+    left = np.full(len(xy), 0.8)          # almost no room to the left
+    right = np.full(len(xy), 6.0)
+    alpha = racing_line_offsets(xy, left, right, margin=0.6)
+    assert alpha.max() <= 0.2 + 1e-6
+    assert alpha.min() >= -5.4 - 1e-6
+
+
+def test_racing_line_opens_up_the_slowest_corner():
+    """The point of the whole exercise: a bigger minimum radius.
+
+    Minimising the plain integral of squared curvature does not achieve this --
+    it is a lap-length average and will spend the hairpin to buy back a little
+    on the sweepers. The solver raises the objective to a higher power for
+    exactly this reason, so the test is on the minimum radius, not the mean.
+    """
+    circuit = get_track("national")
+    side = np.full(circuit.n, 6.0)
+    alpha = racing_line_offsets(circuit.xy, side, side, margin=0.6)
+    line = circuit.xy + alpha[:, None] * ring_normals(circuit.xy)
+
+    # Both measured the same way: a spline refit of one and the designed
+    # curvature of the other would compare two different estimators.
+    before = 1.0 / np.abs(ring_curvature(circuit.xy)).max()
+    after = 1.0 / np.abs(ring_curvature(line)).max()
+    assert after > 1.25 * before, f"minimum radius {before:.1f} m -> {after:.1f} m"
+
+
+def test_racing_line_never_returns_something_worse_than_the_centreline():
+    """The reweighting can cycle, so the routine must be able to decline.
+
+    A circuit whose corners all turn the same way is the case where a
+    minimum-curvature line has nothing to offer.
+    """
+    circuit = from_layout(
+        [("straight", 300), ("corner", 30, -170), ("straight", 200),
+         ("corner", 60, -100), ("straight", 260), ("corner", 45, -60),
+         ("straight", 180), ("corner", 80, -30), ("straight", 220)],
+        half_width=6.0,
+    )
+    side = np.full(circuit.n, 6.0)
+    alpha = racing_line_offsets(circuit.xy, side, side, margin=0.6)
+    line = circuit.xy + alpha[:, None] * ring_normals(circuit.xy)
+    before = 1.0 / np.abs(ring_curvature(circuit.xy)).max()
+    after = 1.0 / np.abs(ring_curvature(line)).max()
+    assert after >= before - 1e-9, f"minimum radius {before:.1f} m -> {after:.1f} m"
+
+
+def test_racing_line_track_is_asymmetric_but_covers_the_same_road():
+    """Room lost on one side of the line has to reappear on the other."""
+    circuit = get_track("gp")
+    side = np.full(circuit.n, 6.0)
+    alpha = racing_line_offsets(circuit.xy, side, side, margin=0.6)
+    total = (side - alpha) + (side + alpha)
+    assert np.allclose(total, 12.0)
+    assert np.abs(alpha).max() > 2.0, "the line never left the centre"
 
 
 # ------------------------------------------------------------------- vehicle
@@ -150,6 +235,30 @@ def test_reference_driver_is_robust_to_random_starts():
     env = make_env("national", n_envs=64, random_start=True, max_seconds=120.0)
     out = env.rollout(ReferenceDriver(half_width=env.track.half_width), seed=3)
     assert np.mean(~np.isnan(out["lap_time"])) > 0.95
+
+
+def test_rear_axle_caps_the_brake_before_the_whole_car_does():
+    """Corner entry is limited by the rear axle, not by the car's total grip.
+
+    Comparing pedal travel against a grip *fraction* -- which is what the first
+    version did -- let the driver ask for roughly twice the force the rear could
+    take, and it spun into Spa's first corner every lap.
+    """
+    p = VehicleParams()
+    drv = ReferenceDriver(params=p)
+    vx = np.array([35.0])
+    load = np.ones(1)
+    straight = drv.rear_brake_limit(vx, np.zeros(1), load)
+    cornering = drv.rear_brake_limit(vx, np.full(1, 14.0), load)
+
+    # What the whole-car ellipse would have allowed at the same lateral load.
+    grip = p.mu * (p.mass * G + p.k_down * vx**2)
+    lat_frac = p.mass * 14.0 / grip[0]
+    whole_car = grip[0] * np.sqrt(1.0 - lat_frac**2)
+
+    assert cornering[0] < straight[0], "cornering must cost braking"
+    assert cornering[0] < whole_car, "the rear axle is the binding limit"
+    assert drv.rear_brake_limit(vx, np.full(1, 40.0), load)[0] == 0.0
 
 
 def test_retired_cars_stop_accruing_reward():

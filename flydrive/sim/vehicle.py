@@ -43,14 +43,16 @@ class VehicleParams:
     rolling: float = 300.0        # N
 
 
-def _rear_load_before_transfer(p: VehicleParams, speed2: np.ndarray) -> np.ndarray:
+def _rear_load_before_transfer(
+    p: VehicleParams, speed2: np.ndarray, load_factor: np.ndarray
+) -> np.ndarray:
     """Rear axle load ignoring longitudinal transfer.
 
     Used only to cap traction-limited drive force, which would otherwise be a
     circular dependency: drive sets the transfer that sets the load that caps
     the drive.
     """
-    static_r = p.mass * G * p.lf / (p.lf + p.lr)
+    static_r = p.mass * G * load_factor * p.lf / (p.lf + p.lr)
     return static_r + (1.0 - p.aero_balance) * p.k_down * speed2
 
 
@@ -72,8 +74,13 @@ def step_dynamics(
     brake: np.ndarray,
     p: VehicleParams,
     dt: float,
+    grade: np.ndarray | None = None,
+    vcurv: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Advance ``state`` (B, 6) = [X, Y, psi, vx, vy, r] by ``dt``.
+
+    ``grade`` is dz/ds along the direction of travel and ``vcurv`` the vertical
+    curvature of the road (negative over a crest). Both default to flat.
 
     Returns ``(new_state, alpha_f, alpha_r)``.
     """
@@ -89,22 +96,37 @@ def step_dynamics(
     speed2 = vx * vx + vy * vy
     downforce = p.k_down * speed2
     wheelbase = p.lf + p.lr
-    static_f = p.mass * G * p.lr / wheelbase
-    static_r = p.mass * G * p.lf / wheelbase
+
+    # Road geometry in the vertical plane.
+    grade = np.zeros_like(vx) if grade is None else grade
+    vcurv = np.zeros_like(vx) if vcurv is None else vcurv
+    slope = np.sqrt(1.0 + grade * grade)
+    sin_theta, cos_theta = grade / slope, 1.0 / slope
+
+    # Following a vertical curve changes what the tyres are pressed into the
+    # road with: a compression adds load, a crest takes it away. At Eau Rouge
+    # this is worth the better part of a g, which is most of the reason the
+    # corner is hard -- and it is exactly what a flat track throws away.
+    load_factor = np.clip(cos_theta + speed2 * vcurv / G, 0.05, 3.0)
+    static_f = p.mass * G * load_factor * p.lr / wheelbase
+    static_r = p.mass * G * load_factor * p.lf / wheelbase
 
     # Longitudinal force generated *at the tyres*: power-limited above ~30 m/s,
     # traction-limited below.
     drive = throttle * np.minimum(
-        p.power / np.maximum(vx, 8.0), p.mu * _rear_load_before_transfer(p, speed2)
+        p.power / np.maximum(vx, 8.0),
+        p.mu * _rear_load_before_transfer(p, speed2, load_factor),
     )
     # Braking is limited by grip as well as by the brakes. Without this the
     # pedal can demand more force than all four tyres can transmit, which in a
     # model with no wheel-lock dynamics just deletes the car's lateral grip.
-    grip_limit = p.mu * (p.mass * G + p.k_down * speed2)
+    grip_limit = p.mu * (p.mass * G * load_factor + p.k_down * speed2)
     stop = np.minimum(brake * p.brake_force, grip_limit)
     f_long = drive - stop
     drag = p.k_drag * speed2 + p.rolling * np.sign(vx)
-    fx = f_long - drag
+    # Gravity along the road: it costs you on the climb out of Eau Rouge and
+    # pays you back down the hill to Stavelot.
+    fx = f_long - drag - p.mass * G * sin_theta
 
     # Longitudinal load transfer. Braking loads the front, which is precisely
     # why a car can brake and turn at the same time.
@@ -146,10 +168,14 @@ def step_dynamics(
     return np.stack([x_n, y_n, psi_n, vx_n, vy_n, r_n], axis=1), alpha_f, alpha_r
 
 
-def cornering_limit(speed: np.ndarray, p: VehicleParams) -> np.ndarray:
+def cornering_limit(
+    speed: np.ndarray, p: VehicleParams, load_factor: np.ndarray | float = 1.0
+) -> np.ndarray:
     """Steady-state lateral acceleration available at a given speed, m/s^2.
 
     Used by the reference driver to build a friction-limited speed profile.
+    ``load_factor`` carries the vertical-curvature effect: below 1 over a
+    crest, above 1 in a compression.
     """
     downforce = p.k_down * speed * speed
-    return p.mu * (p.mass * G + downforce) / p.mass
+    return p.mu * (p.mass * G * load_factor + downforce) / p.mass

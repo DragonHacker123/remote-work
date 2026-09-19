@@ -25,7 +25,11 @@ class EnvConfig:
     target_laps: float = 1.0
     random_start: bool = True
     start_speed: tuple[float, float] = (25.0, 55.0)
-    offtrack_limit: float = 1.8      # multiples of half-width before retiring
+    # Metres past the white line before a car retires. Measured from the edge
+    # rather than as a multiple of the room available, because on a racing line
+    # the room on the inside of a hairpin is a few centimetres and scaling the
+    # retirement threshold by it would delete the car for a normal apex.
+    offtrack_slack: float = 4.8
     spin_limit: float = 1.5          # rad of heading error before retiring
     crash_penalty: float = 30.0
     progress_scale: float = 0.1
@@ -70,7 +74,10 @@ class RaceEnv:
         v0 = np.clip(v_corner, lo, hi) * self.rng.uniform(0.6, 0.95, n)
 
         psi0 = tr.psi[start] + self.rng.normal(0.0, 0.04, n)
-        lat = self.rng.uniform(-0.3, 0.3, n) * tr.half_width
+        # Scatter across the road, but by the room actually available on each
+        # side: on a racing line the apex of a hairpin has almost none.
+        frac = self.rng.uniform(-0.3, 0.3, n)
+        lat = frac * np.where(frac >= 0.0, tr.hw_left[start], tr.hw_right[start])
         x0 = tr.xy[start, 0] - np.sin(tr.psi[start]) * lat
         y0 = tr.xy[start, 1] + np.cos(tr.psi[start]) * lat
 
@@ -122,9 +129,12 @@ class RaceEnv:
 
         live = self.alive
         sub_dt = self.dt / cfg.substeps
+        grade = tr.grade[self.idx]
+        vcurv = tr.vcurv[self.idx]
         for _ in range(cfg.substeps):
             new_state, af, ar = step_dynamics(
-                self.state, steer, throttle, brake, cfg.params, sub_dt
+                self.state, steer, throttle, brake, cfg.params, sub_dt,
+                grade=grade, vcurv=vcurv,
             )
             self.state = np.where(live[:, None], new_state, self.state)
             self.alpha_f = np.where(live, af, self.alpha_f)
@@ -144,7 +154,12 @@ class RaceEnv:
         self.progress = self.progress + delta
 
         reward = cfg.progress_scale * delta
-        over = np.maximum(np.abs(self.e_y) / tr.half_width - 1.0, 0.0)
+        # Room on the side the car has drifted towards. On the centreline the
+        # two are equal and this is the old symmetric test; on a racing line
+        # they are not, and using the wrong one puts the edge in the wrong place.
+        room = np.where(self.e_y >= 0.0, tr.hw_left[self.idx], tr.hw_right[self.idx])
+        beyond = np.maximum(np.abs(self.e_y) - room, 0.0)
+        over = beyond / tr.hw[self.idx]
         reward -= cfg.offtrack_scale * over * over
         reward -= cfg.jerk_scale * np.abs(steer - action[:, 0])
         reward = np.where(live, reward, 0.0)
@@ -154,7 +169,7 @@ class RaceEnv:
         finished = live & (before < target) & (self.progress >= target)
         self.lap_time = np.where(finished & np.isnan(self.lap_time), self.time, self.lap_time)
 
-        off = np.abs(self.e_y) > tr.half_width * cfg.offtrack_limit
+        off = beyond > cfg.offtrack_slack
         spun = np.abs(self.e_psi) > cfg.spin_limit
         stalled = (self.state[:, 3] < 2.0) & (self.time > 3.0)
         timeout = self.time > cfg.max_seconds

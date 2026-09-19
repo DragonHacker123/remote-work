@@ -23,16 +23,24 @@ from ..sim.obs import (
     IDX_EY,
     IDX_VX,
     IDX_YAW_RATE,
+    GRADE_DISTANCES,
+    GRADE_SCALE,
+    GRADE_SLICE,
     KAPPA_SCALE,
     KAPPA_SLICE,
     PREVIEW_DISTANCES,
     R_SCALE,
     V_SCALE,
+    VCURV_SCALE,
+    VCURV_SLICE,
 )
 from ..sim.vehicle import G, VehicleParams
 
 
-def corner_speed(kappa: np.ndarray, p: VehicleParams, v_top: float = 95.0) -> np.ndarray:
+def corner_speed(
+    kappa: np.ndarray, p: VehicleParams, v_top: float = 95.0,
+    load: np.ndarray | float = 1.0,
+) -> np.ndarray:
     """Steady-state speed a corner of curvature ``kappa`` supports.
 
     Solving ``v^2 kappa = mu (m g + k_down v^2) / m`` for v gives a closed
@@ -42,7 +50,9 @@ def corner_speed(kappa: np.ndarray, p: VehicleParams, v_top: float = 95.0) -> np
     k = np.abs(kappa)
     denom = k * p.mass - p.mu * p.k_down
     with np.errstate(divide="ignore", invalid="ignore"):
-        v2 = np.where(denom > 1e-6, p.mu * p.mass * G / np.maximum(denom, 1e-6), np.inf)
+        v2 = np.where(
+            denom > 1e-6, p.mu * p.mass * G * load / np.maximum(denom, 1e-6), np.inf
+        )
     return np.minimum(np.sqrt(np.maximum(v2, 0.0)), v_top)
 
 
@@ -94,10 +104,27 @@ class ReferenceDriver:
             weights[i, j] = t
         self._interp = weights
 
+        # Same idea for the gradient preview, which is sampled more coarsely.
+        gw = np.zeros((len(self._fine), len(GRADE_DISTANCES)))
+        gk = len(GRADE_DISTANCES)
+        for i, d in enumerate(self._fine):
+            j = int(np.clip(np.searchsorted(GRADE_DISTANCES, d), 1, gk - 1))
+            d0, d1 = GRADE_DISTANCES[j - 1], GRADE_DISTANCES[j]
+            t = np.clip((d - d0) / (d1 - d0), 0.0, 1.0)
+            gw[i, j - 1] = 1.0 - t
+            gw[i, j] = t
+        self._grade_interp = gw
+
     def reset(self, n: int) -> None:  # stateless, but keeps the policy protocol
         pass
 
-    def target_speed(self, vx: np.ndarray, kappa_preview: np.ndarray) -> np.ndarray:
+    def target_speed(
+        self,
+        vx: np.ndarray,
+        kappa_preview: np.ndarray,
+        grade_preview: np.ndarray | None = None,
+        vcurv_preview: np.ndarray | None = None,
+    ) -> np.ndarray:
         """Fastest speed now that still allows braking for every previewed corner.
 
         Checking each preview sample independently is not enough: it misses
@@ -109,16 +136,57 @@ class ReferenceDriver:
         """
         p = self.p
         kappa_fine = np.abs(kappa_preview) @ self._interp.T     # (B, M)
-        v_limit = corner_speed(kappa_fine, p, self.v_top)
         step = self._fine[1] - self._fine[0]
 
-        v = v_limit[:, -1]
-        for j in range(v_limit.shape[1] - 2, -1, -1):
-            a_tyre = p.mu * (p.mass * G + p.k_down * v * v) / p.mass
+        # Gravity along the road changes what braking is available: downhill
+        # into a corner is the classic way to arrive too fast. Vertical
+        # curvature changes how much grip there is at all -- Les Combes sits
+        # over a crest at the top of the Kemmel climb, so the car goes light
+        # exactly where it is braking hardest.
+        zeros = np.zeros_like(kappa_fine)
+        grade_fine = zeros if grade_preview is None else grade_preview @ self._grade_interp.T
+        vcurv_fine = zeros if vcurv_preview is None else vcurv_preview @ self._grade_interp.T
+        cos_theta = 1.0 / np.sqrt(1.0 + grade_fine * grade_fine)
+
+        v = corner_speed(kappa_fine[:, -1], p, self.v_top)
+        for j in range(kappa_fine.shape[1] - 2, -1, -1):
+            load = np.clip(cos_theta[:, j] + v * v * vcurv_fine[:, j] / G, 0.15, 2.5)
+            limit = corner_speed(kappa_fine[:, j], p, self.v_top, load)
+            a_tyre = p.mu * (p.mass * G * load + p.k_down * v * v) / p.mass
             a = np.minimum(a_tyre, p.brake_force / p.mass) * self.brake_safety
-            a = a + p.k_drag * v * v / p.mass
-            v = np.minimum(v_limit[:, j], np.sqrt(v * v + 2.0 * a * step))
+            a = a + p.k_drag * v * v / p.mass + G * grade_fine[:, j]
+            v = np.minimum(limit, np.sqrt(v * v + 2.0 * np.maximum(a, 0.5) * step))
         return self.speed_margin * np.minimum(v, self.v_top)
+
+    def rear_brake_limit(
+        self, vx: np.ndarray, a_lat: np.ndarray, load: np.ndarray
+    ) -> np.ndarray:
+        """Brake force the rear axle can take while cornering at ``a_lat``.
+
+        The whole-car friction ellipse is not the binding constraint on corner
+        entry: the rear axle is. It carries the smaller share of the weight,
+        braking transfers load off it, and the moment it saturates the car
+        rotates. Because the load depends on the very force being solved for,
+        the ellipse is a quadratic in brake force rather than a simple cap.
+
+        Lateral force is split between the axles in inverse proportion to their
+        distance from the centre of mass, which is the zero-yaw-moment
+        condition.
+        """
+        p = self.p
+        wheelbase = p.lf + p.lr
+        rest = (
+            p.mass * G * load * p.lf / wheelbase
+            + (1.0 - p.aero_balance) * p.k_down * vx * vx
+        )
+        fy = p.mass * a_lat * p.lf / wheelbase
+        c = p.h_cog / wheelbase
+        share = 1.0 - p.brake_bias
+        a = max(share * share - (p.mu * c) ** 2, 1e-3)
+        b = 2.0 * p.mu * p.mu * rest * c
+        const = fy * fy - (p.mu * rest) ** 2
+        disc = np.maximum(b * b - 4.0 * a * const, 0.0)
+        return np.maximum((-b + np.sqrt(disc)) / (2.0 * a), 0.0)
 
     @property
     def understeer_gradient(self) -> float:
@@ -136,6 +204,8 @@ class ReferenceDriver:
         e_y = obs[:, IDX_EY] * self.half_width                       # metres
         e_psi = np.arctan2(obs[:, IDX_EPSI_SIN], obs[:, IDX_EPSI_COS])
         kappa = obs[:, KAPPA_SLICE] * KAPPA_SCALE
+        grade = obs[:, GRADE_SLICE] * GRADE_SCALE
+        vcurv = obs[:, VCURV_SLICE] * VCURV_SCALE
 
         # Feedforward: the steering angle the corner actually needs, Ackermann
         # plus the understeer correction. Without this the feedback terms have
@@ -155,7 +225,7 @@ class ReferenceDriver:
         )
         steer = np.clip((delta_ff + delta_fb) / p.max_steer, -1.0, 1.0)
 
-        v_target = self.target_speed(vx, kappa)
+        v_target = self.target_speed(vx, kappa, grade, vcurv)
         err = v_target - vx
         throttle = np.clip(self.k_throttle * err, 0.0, 1.0)
         brake = np.clip(-self.k_brake * err, 0.0, 1.0)
@@ -163,10 +233,24 @@ class ReferenceDriver:
         # Friction ellipse, applied by the driver rather than discovered by
         # crashing: grip already spent on cornering is not available for
         # acceleration. Flooring it mid-corner is exactly how you spin.
+        #
+        # The first version of this compared *pedal travel* against a *force*
+        # fraction. Full brake is 32 kN, roughly twice what the tyres can take
+        # at 35 m/s, so "brake <= 0.78" still permitted a demand well past the
+        # limit -- and it checked the car as a whole, when what actually lets go
+        # on corner entry is the rear axle by itself. On Spa's approach to La
+        # Source that combination retired the reference driver every lap.
+        slope2 = 1.0 + grade[:, 0] * grade[:, 0]
+        load = np.clip(1.0 / np.sqrt(slope2) + vx * vx * vcurv[:, 0] / G, 0.15, 2.5)
+        grip = p.mu * (p.mass * G * load + p.k_down * vx * vx)        # newtons
         a_lat = np.abs(vx * yaw_rate)
-        a_max = p.mu * (p.mass * G + p.k_down * vx * vx) / p.mass
-        lat_frac = np.clip(a_lat / np.maximum(a_max, 1.0), 0.0, 0.98)
-        long_avail = np.sqrt(1.0 - lat_frac * lat_frac)
-        throttle = np.minimum(throttle, long_avail)
-        brake = np.minimum(brake, long_avail)
+        lat_frac = np.clip(p.mass * a_lat / np.maximum(grip, 1.0), 0.0, 0.98)
+        long_force = grip * np.sqrt(1.0 - lat_frac * lat_frac)
+
+        drive_cap = np.minimum(p.power / np.maximum(vx, 8.0), grip)
+        throttle = np.minimum(throttle, long_force / np.maximum(drive_cap, 1.0))
+        brake = np.minimum(
+            brake,
+            np.minimum(long_force, self.rear_brake_limit(vx, a_lat, load)) / p.brake_force,
+        )
         return np.stack([steer, throttle, brake], axis=1)

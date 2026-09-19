@@ -31,10 +31,17 @@ PREVIEW_DISTANCES = np.array([8.0, 16.0, 28.0, 45.0, 65.0, 90.0, 120.0, 155.0, 1
 PURSUIT_DISTANCES = np.array([12.0, 40.0, 90.0])
 PURSUIT_TIME = 1.1        # seconds of lookahead the driver targets
 
+# Road gradient ahead. On a circuit with real elevation this is not decoration:
+# a 13% climb out of Eau Rouge costs about a tenth of the available drive force,
+# and the compression at its base adds most of a g of tyre load.
+GRADE_DISTANCES = np.array([8.0, 45.0, 90.0, 155.0])
+
 OBS_NAMES: list[str] = (
     ["vx", "vy", "yaw_rate", "e_y", "e_psi_sin", "e_psi_cos"]
     + [f"pursuit_{int(d)}" for d in PURSUIT_DISTANCES]
     + [f"kappa_{int(d)}" for d in PREVIEW_DISTANCES]
+    + [f"grade_{int(d)}" for d in GRADE_DISTANCES]
+    + [f"vcurv_{int(d)}" for d in GRADE_DISTANCES]
     + ["last_steer", "last_throttle", "last_brake", "slip_front", "slip_rear"]
     + ["yaw_sin", "yaw_cos", "goal_sin", "goal_cos"]
 )
@@ -56,6 +63,14 @@ KAPPA_SLICE = slice(
     OBS_NAMES.index(f"kappa_{int(PREVIEW_DISTANCES[0])}"),
     OBS_NAMES.index(f"kappa_{int(PREVIEW_DISTANCES[-1])}") + 1,
 )
+GRADE_SLICE = slice(
+    OBS_NAMES.index(f"grade_{int(GRADE_DISTANCES[0])}"),
+    OBS_NAMES.index(f"grade_{int(GRADE_DISTANCES[-1])}") + 1,
+)
+VCURV_SLICE = slice(
+    OBS_NAMES.index(f"vcurv_{int(GRADE_DISTANCES[0])}"),
+    OBS_NAMES.index(f"vcurv_{int(GRADE_DISTANCES[-1])}") + 1,
+)
 
 # The last four entries are absolute world angles rather than scale-free
 # features. They are consumed only by the central-complex ring encoder, which
@@ -70,6 +85,8 @@ VY_SCALE = 8.0
 R_SCALE = 1.5
 KAPPA_SCALE = 0.04
 SLIP_SCALE = 0.25
+GRADE_SCALE = 0.12        # 12% is about the steepest on a Grand Prix circuit
+VCURV_SCALE = 0.002
 
 
 def make_obs(
@@ -80,6 +97,8 @@ def make_obs(
     e_psi: np.ndarray,
     pursuit: np.ndarray,
     kappa_preview: np.ndarray,
+    grade_preview: np.ndarray,
+    vcurv_preview: np.ndarray,
     last_action: np.ndarray,
     slip_front: np.ndarray,
     slip_rear: np.ndarray,
@@ -98,6 +117,8 @@ def make_obs(
             np.cos(e_psi),
             pursuit / (np.pi / 2),
             kappa_preview / KAPPA_SCALE,
+            grade_preview / GRADE_SCALE,
+            vcurv_preview / VCURV_SCALE,
             last_action,
             np.clip(slip_front / SLIP_SCALE, -3.0, 3.0),
             np.clip(slip_rear / SLIP_SCALE, -3.0, 3.0),
@@ -171,6 +192,8 @@ def observe(
         e_psi=e_psi,
         pursuit=(aims - heading[:, None] + np.pi) % (2.0 * np.pi) - np.pi,
         kappa_preview=track.preview(idx, PREVIEW_DISTANCES),
+        grade_preview=track.preview_grade(idx, GRADE_DISTANCES),
+        vcurv_preview=track.preview_vcurv(idx, GRADE_DISTANCES),
         last_action=last_action,
         slip_front=slip[0],
         slip_rear=slip[1],
