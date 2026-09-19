@@ -9,8 +9,17 @@ import numpy as np
 
 
 def _load_theta(path: str) -> np.ndarray:
+    """The best network in a saved run, preferring the one that actually laps.
+
+    ``best_theta`` maximises fixed-horizon fitness, which stops separating
+    policies once they all survive the window. ``fastest_theta`` is the one with
+    the quickest measured lap, and that is what the run is for.
+    """
     data = np.load(path)
-    return data["best_theta"] if "best_theta" in data else data["theta"]
+    for key in ("fastest_theta", "best_theta", "theta"):
+        if key in data:
+            return data[key]
+    raise KeyError(f"{path} holds none of fastest_theta, best_theta, theta")
 
 
 def cmd_info(args) -> int:
@@ -110,14 +119,21 @@ def cmd_train(args) -> int:
         control=args.control,
         seed=args.seed,
         log_every=args.log_every,
+        lap_eval_every=args.lap_eval_every,
         es=ESConfig(popsize=args.popsize, sigma=0.08, lr=0.05, seed=args.seed),
     )
     res = train_curriculum(
         cfg, imitation_generations=args.imitation, reward_generations=args.generations
     )
-    print("\n", evaluate_laps(res["best_theta"], cfg))
+    keep = res.get("fastest_theta") if res.get("fastest_lap") else res["best_theta"]
+    print("\n", evaluate_laps(keep, cfg))
     if args.out:
-        np.savez(args.out, theta=res["theta"], best_theta=res["best_theta"])
+        np.savez(
+            args.out,
+            theta=res["theta"],
+            best_theta=res["best_theta"],
+            fastest_theta=res.get("fastest_theta", res["best_theta"]),
+        )
         print(f"saved {args.out}")
     return 0
 
@@ -213,6 +229,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--control", default="none")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--log-every", type=int, default=5)
+    # Fixed-horizon fitness stops separating policies once they all survive
+    # the window. Measuring a real lap now and then is what lets the run keep
+    # chasing speed after it has learned to get round.
+    p.add_argument("--lap-eval-every", type=int, default=25)
     p.add_argument("--out", default="")
     p.set_defaults(func=cmd_train)
 
