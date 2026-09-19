@@ -166,8 +166,19 @@ climb.
    maximising progress *is* lap-time optimisation. Only this stage can beat the
    teacher, because only here is the objective speed rather than similarity.
 
-Two things are bolted onto stage 3 so that "it completes a lap" is not where
-training stops:
+Stage 3 runs in **segments of growing horizon** — 18 s for half the budget, then
+36 s, then 63 s. A short window is a dense, cheap signal for learning to take a
+corner at all, but it cannot teach a car to survive a 7 km lap: at 18 s out of
+118 s, a car that crashes at 17 s scores almost as well as one that survives, so
+nothing selects for stringing corners together. Measured over 400 generations at
+a fixed 18 s on Spa, the crash penalty being charged started at 37 and was still
+23 at the end — essentially every car was still crashing inside the window. The
+shares are weighted against cost, because a generation costs what its horizon
+costs, and at 63 s the *implicit* penalty for crashing (the distance not
+covered) is an order of magnitude larger than the explicit one.
+
+Two more things are bolted onto stage 3 so that "it completes a lap" is not
+where training stops:
 
 - A **true lap time** is measured from the start line every 25 generations and
   the fastest parameters are kept separately from the highest-fitness ones.
@@ -415,6 +426,16 @@ objective is raised to the fourth power by iteratively reweighted least squares.
 That reweighting is a fixed point rather than a descent and can cycle, so every
 iterate is scored on peak curvature and the best is kept — with the centreline
 in the running, which means the routine can decline to produce a line at all.
+
+**A training horizon is a claim about what you are selecting for.** Stage 3
+scored a policy on distance covered in a fixed 18-second window, which on a
+2.7 km layout is 22% of a lap and worked fine. On Spa it is 15% of one, and it
+quietly stops selecting for survival: a car that crashes at 17 s scores almost
+as well as a car that gets round. The symptom was not obvious — fitness and
+distance both climbed for 400 generations — and it only showed up by subtracting
+fitness from the progress reward to recover what the crash penalty was actually
+charging. It never fell below 23 against a penalty of 30. More generations would
+not have fixed it, because the objective could not see the difference.
 
 **Pedal travel is not a force.** The reference driver's friction ellipse
 compared brake *pedal* against a grip *fraction*. Full brake is 32 kN, about
