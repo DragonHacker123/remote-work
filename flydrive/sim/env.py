@@ -46,7 +46,7 @@ class RaceEnv:
     reward thereafter, so a fixed-horizon rollout is a valid fitness measure.
     """
 
-    def __init__(self, track: Track | str = "gp1", config: EnvConfig | None = None, seed: int = 0):
+    def __init__(self, track: Track | str = "spa", config: EnvConfig | None = None, seed: int = 0):
         self.track = get_track(track) if isinstance(track, str) else track
         self.cfg = config or EnvConfig()
         self.dt = 1.0 / self.cfg.control_hz
@@ -234,7 +234,7 @@ class RaceEnv:
         return out
 
 
-def make_env(track: str = "gp1", n_envs: int = 64, seed: int = 0, **kw) -> RaceEnv:
+def make_env(track: str = "spa", n_envs: int = 64, seed: int = 0, **kw) -> RaceEnv:
     cfg = EnvConfig(n_envs=n_envs, **kw)
     return RaceEnv(track=track, config=cfg, seed=seed)
 

@@ -69,6 +69,7 @@
   .badge.readout_fit { color: var(--dim); }
   .badge.imitation { color: var(--amber); border-color: #4a3a1c; }
   .badge.reward { color: var(--accent); border-color: #1d4a47; }
+  .badge.fastest { color: var(--good); border-color: #1d4a2c; }
   button {
     font: 500 13px/1 var(--sans); color: var(--text);
     background: var(--panel-2); border: 1px solid var(--line);
@@ -178,9 +179,11 @@
     <section class="card">
       <h2>Circuit · top-down</h2>
       <canvas class="track" id="track" width="900" height="620"></canvas>
+      <canvas class="track" id="relief" width="900" height="96" style="margin-top:8px"></canvas>
       <div class="legend" style="margin-top:9px">
-        <span><i class="swatch" style="background:#242e38"></i>track</span>
-        <span><i class="swatch" style="background:repeating-linear-gradient(90deg,#4a5a68 0 5px,transparent 5px 10px)"></i>reference line</span>
+        <span><i class="swatch" id="sw-low"></i>low</span>
+        <span><i class="swatch" id="sw-high"></i>high</span>
+        <span><i class="swatch" style="background:repeating-linear-gradient(90deg,#7d909e 0 5px,transparent 5px 10px)"></i>reference line</span>
         <span><i class="swatch" style="background:#2f4a52"></i>earlier attempts</span>
         <span><i class="swatch" style="background:#4fd6c8"></i>this attempt</span>
       </div>
@@ -206,7 +209,8 @@
     <div class="tile"><div class="k">speed</div><div class="n" id="t-speed">—</div><div class="u">km/h</div></div>
     <div class="tile"><div class="k">throttle</div><div class="n" id="t-thr">—</div><div class="u">0–1</div></div>
     <div class="tile"><div class="k">brake</div><div class="n" id="t-brk">—</div><div class="u">0–1</div></div>
-    <div class="tile"><div class="k">off centre</div><div class="n" id="t-ey">—</div><div class="u">m (limit ±6)</div></div>
+    <div class="tile"><div class="k">off the line</div><div class="n" id="t-ey">—</div><div class="u">m</div></div>
+    <div class="tile"><div class="k">altitude</div><div class="n" id="t-alt">—</div><div class="u">m</div></div>
     <div class="tile"><div class="k">elapsed</div><div class="n" id="t-time">—</div><div class="u">s</div></div>
     <div class="tile"><div class="k">distance</div><div class="n" id="t-dist">—</div><div class="u">m</div></div>
   </div>
@@ -377,28 +381,78 @@ function trackBounds() {
   return {x0: Math.min(...xs) - pad, x1: Math.max(...xs) + pad,
           y0: Math.min(...ys) - pad, y1: Math.max(...ys) + pad};
 }
-function drawTrack() {
-  const c = $("track"), g = c.getContext("2d");
-  const W = c.width, H = c.height;
-  const sx = W / (bounds.x1 - bounds.x0), sy = H / (bounds.y1 - bounds.y0);
-  const s = Math.min(sx, sy);
-  const ox = (W - (bounds.x1 - bounds.x0) * s) / 2, oy = (H - (bounds.y1 - bounds.y0) * s) / 2;
-  const P = (x, y) => [ox + (x - bounds.x0) * s, H - (oy + (y - bounds.y0) * s)];
+/* Projection from world metres to canvas pixels. Shared by the cached road
+   layer and the live overlay so the two cannot drift apart. */
+function projector(W, H) {
+  const s = Math.min(W / (bounds.x1 - bounds.x0), H / (bounds.y1 - bounds.y0));
+  const ox = (W - (bounds.x1 - bounds.x0) * s) / 2;
+  const oy = (H - (bounds.y1 - bounds.y0) * s) / 2;
+  return [(x, y) => [ox + (x - bounds.x0) * s, H - (oy + (y - bounds.y0) * s)], s];
+}
 
+/* Elevation ramp: cold and low to warm and high. Spa climbs 106 m between Eau
+   Rouge and Les Combes, and a flat grey circuit hides the single fact that
+   makes the place what it is. */
+function heightColor(t) {
+  const stops = [[36,52,74],[38,74,88],[62,96,84],[112,110,70],[158,116,66],[196,140,84]];
+  const u = Math.max(0, Math.min(1, t)) * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(u)), f = u - i;
+  const a = stops[i], b = stops[i + 1];
+  return `rgb(${Math.round(a[0]+(b[0]-a[0])*f)},${Math.round(a[1]+(b[1]-a[1])*f)},${Math.round(a[2]+(b[2]-a[2])*f)})`;
+}
+
+/* The road and the reference line never change, and on a 7 km circuit the road
+   is 2300 separately-coloured segments. Draw it once and blit it. */
+let roadLayer = null;
+function buildRoad(W, H) {
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const g = c.getContext("2d");
+  const [P, s] = projector(W, H);
   g.fillStyle = "#0a0e13"; g.fillRect(0, 0, W, H);
 
-  // Road surface: the centreline stroked to full track width.
+  const xy = DATA.track.xy, z = DATA.track.z;
+  const lo = z ? Math.min(...z) : 0, hi = z ? Math.max(...z) : 1;
+  const relief = z && hi - lo > 5;
+  g.lineJoin = "round"; g.lineCap = "round";
+
+  if (relief) {
+    // Segment by segment, shaded by altitude.
+    for (let i = 0; i < xy.length; i++) {
+      const j = (i + 1) % xy.length;
+      const [x0, y0] = P(xy[i][0], xy[i][1]), [x1, y1] = P(xy[j][0], xy[j][1]);
+      g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1);
+      g.lineWidth = DATA.track.half_width * 2 * s;
+      g.strokeStyle = heightColor((z[i] - lo) / (hi - lo));
+      g.stroke();
+    }
+  } else {
+    g.beginPath();
+    xy.forEach((p, i) => { const [X, Y] = P(p[0], p[1]); i ? g.lineTo(X, Y) : g.moveTo(X, Y); });
+    g.closePath();
+    g.lineWidth = DATA.track.half_width * 2 * s; g.strokeStyle = "#242e38"; g.stroke();
+  }
+
+  // Racing line the road was built around, hairline down the middle.
   g.beginPath();
-  DATA.track.xy.forEach((p, i) => { const [X, Y] = P(p[0], p[1]); i ? g.lineTo(X, Y) : g.moveTo(X, Y); });
+  xy.forEach((p, i) => { const [X, Y] = P(p[0], p[1]); i ? g.lineTo(X, Y) : g.moveTo(X, Y); });
   g.closePath();
-  g.lineWidth = DATA.track.half_width * 2 * s; g.strokeStyle = "#242e38";
-  g.lineJoin = "round"; g.lineCap = "round"; g.stroke();
-  g.lineWidth = Math.max(1, 0.5 * s); g.strokeStyle = "#323f4b"; g.setLineDash([]); g.stroke();
+  g.lineWidth = Math.max(1, 0.5 * s); g.strokeStyle = "rgba(190,210,225,0.28)"; g.stroke();
 
   // Reference driver's line.
   g.beginPath();
   DATA.reference.line.forEach((p, i) => { const [X, Y] = P(p[0], p[1]); i ? g.lineTo(X, Y) : g.moveTo(X, Y); });
-  g.setLineDash([6, 6]); g.lineWidth = 1.6; g.strokeStyle = "#4a5a68"; g.stroke(); g.setLineDash([]);
+  g.setLineDash([6, 6]); g.lineWidth = 1.6; g.strokeStyle = "#7d909e"; g.stroke(); g.setLineDash([]);
+  return c;
+}
+
+function drawTrack() {
+  const c = $("track"), g = c.getContext("2d");
+  const W = c.width, H = c.height;
+  const [P, s] = projector(W, H);
+
+  if (!roadLayer || roadLayer.width !== W || roadLayer.height !== H) roadLayer = buildRoad(W, H);
+  g.drawImage(roadLayer, 0, 0);
 
   // Every earlier attempt, faint, so the growing reach is visible at rest.
   for (let k = 0; k < S.ck; k++) {
@@ -467,11 +521,59 @@ function drawCurve() {
     const stage = DATA.checkpoints[i].stage;
     g.beginPath(); g.arc(X(i), Y(v), i === S.ck ? 5 : 3, 0, Math.PI * 2);
     g.fillStyle = i === S.ck ? "#ffffff"
+      : stage === "fastest" ? "#46d67f"
       : stage === "reward" ? "#4fd6c8" : stage === "imitation" ? "#f2a73b" : "#6b7a88";
     g.fill();
   });
   g.fillStyle = "#6b7a88";
   g.fillText("distance reached per attempt →", 8, H - 4);
+}
+
+/* ----------------------------------------------------------- elevation */
+/* The plan view cannot show a 106 m climb. This can: altitude against
+   distance round the lap, with where the car has got to marked on it. Eau
+   Rouge is the compression at the bottom of the tall bit. */
+function drawRelief(distance) {
+  const c = $("relief");
+  const z = DATA.track.z, grade = DATA.track.grade;
+  if (!z || !z.length) { c.style.display = "none"; return; }
+  const g = c.getContext("2d"), W = c.width, H = c.height;
+  const lo = Math.min(...z), hi = Math.max(...z);
+  if (hi - lo < 5) { c.style.display = "none"; return; }
+
+  g.fillStyle = "#0a0e13"; g.fillRect(0, 0, W, H);
+  const pad = 14;
+  const X = i => (i / (z.length - 1)) * (W - 2) + 1;
+  const Y = v => H - pad - ((v - lo) / (hi - lo)) * (H - pad - 8);
+
+  for (let i = 0; i < z.length - 1; i++) {
+    g.beginPath();
+    g.moveTo(X(i), H); g.lineTo(X(i), Y(z[i])); g.lineTo(X(i + 1), Y(z[i + 1])); g.lineTo(X(i + 1), H);
+    g.closePath();
+    g.fillStyle = heightColor((z[i] - lo) / (hi - lo));
+    g.fill();
+  }
+  // Steep sections called out: this is where gravity is doing the work.
+  if (grade) {
+    for (let i = 0; i < grade.length - 1; i++) {
+      if (Math.abs(grade[i]) < 6) continue;
+      g.beginPath(); g.moveTo(X(i), Y(z[i])); g.lineTo(X(i + 1), Y(z[i + 1]));
+      g.lineWidth = 2.5; g.strokeStyle = grade[i] > 0 ? "#f2a73b" : "#4fd6c8"; g.stroke();
+    }
+  }
+
+  const frac = ((distance % DATA.track.length) + DATA.track.length) % DATA.track.length / DATA.track.length;
+  const px = frac * (W - 2) + 1;
+  g.beginPath(); g.moveTo(px, 4); g.lineTo(px, H - 2);
+  g.lineWidth = 1.5; g.strokeStyle = "#e8fffb"; g.stroke();
+
+  g.font = "11px " + getComputedStyle(document.body).getPropertyValue("--mono");
+  g.fillStyle = "#6b7a88";
+  g.fillText(`${Math.round(lo)}–${Math.round(hi)} m · ${Math.round(hi - lo)} m of climb per lap`, 6, H - 3);
+  g.textAlign = "right";
+  g.fillStyle = "#f2a73b"; g.fillText("climb >6%", W - 74, H - 3);
+  g.fillStyle = "#4fd6c8"; g.fillText("descent >6%", W - 6, H - 3);
+  g.textAlign = "left";
 }
 
 /* ------------------------------------------------------------- rendering */
@@ -481,6 +583,7 @@ function render() {
   const i = Math.min(S.frame, Math.max(0, f.x.length - 1));
 
   drawTrack();
+  drawRelief(distanceTo(S.ck, i));
 
   for (const key of ["epg", "fc2", "d7", "pfl3l", "pfl3r"]) {
     const row = popRow(S.ck, key, i);
@@ -515,6 +618,7 @@ function render() {
   $("t-thr").textContent = (f.throttle[i] || 0).toFixed(2);
   $("t-brk").textContent = (f.brake[i] || 0).toFixed(2);
   $("t-ey").textContent = (f.e_y[i] || 0).toFixed(1);
+  $("t-alt").textContent = f.z && f.z.length ? Math.round(f.z[i] || 0) : "—";
   $("t-time").textContent = (i * DATA.dt).toFixed(1);
   $("t-dist").textContent = Math.round(distanceTo(S.ck, i));
 
@@ -540,8 +644,79 @@ function bestCheckpoint() {
   return best;
 }
 
+/* The motor-bus paragraph is computed, not written. An earlier run of this
+   pipeline let evolution switch DNa02 and DNa01 off entirely and steer through
+   the stop channel; a silence penalty was added to stop it. Whether that
+   worked is a property of the data in front of you, so the page reads it off
+   rather than asserting last time's answer. */
+const MOTOR = [["dna02_l", "DNa02 left"], ["dna02_r", "DNa02 right"],
+               ["dna01", "DNa01 (go)"], ["dnp09", "DNp09 (stop)"]];
+const SILENT = 5, FAINT = 20;            // out of 100, the run-wide normalisation
+
+function motorReport() {
+  const best = bestCheckpoint();
+  const rows = MOTOR.map(([key, label]) => ({
+    label, start: ckMax(0, key), end: ckMax(best, key),
+  }));
+  const dead = rows.filter(r => r.end <= SILENT);
+  const faint = rows.filter(r => r.end > SILENT && r.end <= FAINT);
+  const table = rows.map(r =>
+    `<code>${r.label}</code> ${r.start} → <b style="color:${
+      r.end <= SILENT ? "var(--warn)" : r.end <= FAINT ? "var(--amber)" : "var(--good)"
+    }">${r.end}</b>`).join(" · ");
+  const names = list => list.map(d => `<em>${d.label}</em>`).join(" and ");
+
+  let verdict;
+  if (dead.length) {
+    verdict = `${names(dead)} ${dead.length > 1 ? "have" : "has"} gone silent: evolution drove
+      ${dead.length > 1 ? "them" : "it"} below threshold and steers through whatever is left.
+      The central complex upstream still computes the heading error correctly — it is the
+      readout that abandoned the fly's own convention, and nothing in the objective asked it
+      not to.`;
+  } else if (faint.length) {
+    verdict = `nothing is switched off, but ${names(faint)} ${faint.length > 1 ? "are" : "is"}
+      running faint. The bus survives; the policy leans on part of it.`;
+  } else {
+    verdict = `every descending channel is still carrying signal, so the left–right difference
+      across DNa02 really is steering the car and DNa01 really is setting its speed.`;
+  }
+
+  return `<b>Did it keep the fly's motor bus?</b> Peak rate at the first checkpoint versus the
+    best one, on the run-wide scale: ${table}. So ${verdict} This is not automatic — reward
+    alone has no reason to keep the motor bus alive, and an earlier run of this pipeline drove
+    DNa02 and DNa01 below threshold entirely and steered through DNp09, the <em>stop</em>
+    channel, plus a constant offset. A softplus rate law and a penalty on populations the
+    policy never uses are what stand between this run and that one.`;
+}
+
 function explain() {
   const best = DATA.checkpoints[bestCheckpoint()];
+  const z = DATA.track.z || [];
+  const climb = z.length ? Math.round(Math.max(...z) - Math.min(...z)) : 0;
+
+  const relief = climb > 5
+    ? `<br><br><b>Why the circuit is shaded.</b> This is the surveyed
+       ${DATA.track.name === "spa" ? "Spa-Francorchamps" : DATA.track.name} centreline with
+       real terrain on it — ${climb} m of elevation change per lap — and the height is in the
+       physics, not just the picture. Gravity acts along the road, so the climb out of Eau
+       Rouge costs about a tenth of the drive force and the run down to Stavelot hands it
+       back. Following a vertical curve changes what the tyres are pressed into the road
+       with: the compression at the bottom of Eau Rouge is worth most of an extra g, and the
+       crest at Les Combes takes grip away exactly where the car is braking hardest. Driving
+       Spa flat removes most of what makes Spa difficult.`
+    : "";
+
+  const surveyed = climb > 5;
+  const line = `<br><br><b>The line it is being judged against.</b> ` + (surveyed
+    ? `The reference path is not the centreline. Spa's centreline has a 10.0 m radius through
+       the Bus Stop and 13.8 m at La Source, which no car gets round; a driver opens both out
+       across the full width. So the path drawn down the middle of the road is a
+       minimum-curvature racing line solved through the surveyed corridor, and it takes the
+       tightest radius on the lap to 15.8 m. `
+    : `The path drawn down the middle of the road is the circuit's centreline. `) +
+    `The dashed line is a classical controller — textbook vehicle dynamics, no learning —
+     lapping it in ${DATA.reference.lap_time} s. That is the number to beat.`;
+
   $("explain").innerHTML =
     `<b>What you are looking at.</b> The two rings are the fly's central complex. EPG holds a
      bump of activity at the car's compass heading; FC2 holds one at the direction the racing
@@ -556,15 +731,7 @@ function explain() {
           driver's ${DATA.reference.lap_time}s. Later checkpoints wander, because evolution
           strategies follow a population mean that keeps moving after it first finds a lap.`
       : "") +
-    `<br><br><b>Something the training did that we did not ask for.</b> Scrub from the first
-     checkpoint to the last and watch <em>DNa02</em> and <em>DNa01</em>. They start active —
-     the readout was initialised to the fly's own convention, where the left–right difference
-     across DNa02 steers and DNa01 sets speed — and training switches them off entirely. In the
-     lapping network they never fire. The car is steered through DNp09, nominally the
-     <em>stop</em> channel, plus a constant offset. Evolution was given a motor bus of 60
-     descending neurons and chose to drive through 12 of them. The central complex upstream
-     still computes the heading error correctly; it is the readout that abandoned the
-     biological convention, and nothing in the objective asked it not to.`;
+    relief + line + "<br><br>" + motorReport();
 }
 
 /* ------------------------------------------------------------ playback */
@@ -612,6 +779,8 @@ function boot() {
   const aspect = (bounds.y1 - bounds.y0) / (bounds.x1 - bounds.x0);
   cv.width = 900;
   cv.height = Math.round(Math.max(420, Math.min(980, 900 * aspect)));
+  $("sw-low").style.background = heightColor(0);
+  $("sw-high").style.background = heightColor(1);
   buildBrain();
   $("s-track").textContent = DATA.track.name;
   $("s-len").textContent = Math.round(DATA.track.length) + " m";

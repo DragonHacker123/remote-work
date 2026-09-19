@@ -34,7 +34,15 @@ def cmd_info(args) -> int:
     print("\ntracks:")
     for name in sorted(TRACKS):
         track = get_track(name)
-        print(f"  {name:10s} {track.length:6.0f} m  min radius {1/np.abs(track.kappa).max():5.0f} m")
+        relief = (
+            f"  climb {track.z.max() - track.z.min():4.0f} m"
+            f"  gradient {track.grade.min()*100:+.0f}%..{track.grade.max()*100:+.0f}%"
+            if track.has_elevation else ""
+        )
+        print(
+            f"  {name:14s} {track.length:6.0f} m  min radius "
+            f"{1/np.abs(track.kappa).max():5.0f} m{relief}"
+        )
     return 0
 
 
@@ -187,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_info)
 
     p = sub.add_parser("reference", help="lap time of the classical driver")
-    p.add_argument("--track", default="national")
+    p.add_argument("--track", default="spa")
     p.set_defaults(func=cmd_reference)
 
     p = sub.add_parser("probe-cx", help="show the central-complex steering signal")
@@ -195,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_probe)
 
     p = sub.add_parser("train", help="train a connectome brain to drive")
-    p.add_argument("--track", default="national")
+    p.add_argument("--track", default="spa")
     p.add_argument("--generations", type=int, default=200)
     p.add_argument("--imitation", type=int, default=30)
     p.add_argument("--popsize", type=int, default=24)
@@ -210,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("evaluate", help="lap times for a saved parameter set")
     p.add_argument("theta")
-    p.add_argument("--track", default="national")
+    p.add_argument("--track", default="spa")
     p.add_argument("--control", default="none")
     p.add_argument("--envs", type=int, default=32)
     p.add_argument("--seed", type=int, default=0)
@@ -218,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("session", help="multi-lap session with MB plasticity")
     p.add_argument("--theta", default="")
-    p.add_argument("--track", default="national")
+    p.add_argument("--track", default="spa")
     p.add_argument("--laps", type=int, default=16)
     p.add_argument("--envs", type=int, default=24)
     p.add_argument("--sectors", type=int, default=24)

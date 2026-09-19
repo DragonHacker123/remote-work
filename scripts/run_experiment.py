@@ -34,7 +34,7 @@ def reference_lap(track: str) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--track", default="national")
+    ap.add_argument("--track", default="spa")
     ap.add_argument("--generations", type=int, default=250)
     ap.add_argument("--imitation", type=int, default=30)
     ap.add_argument("--popsize", type=int, default=24)

@@ -51,7 +51,7 @@ def replay(theta, conn, track_name, max_frames, stride, seed):
     obs = env.reset(seed=seed)
     brain.reset(1)
 
-    out = {k: [] for k in ("x", "y", "heading", "speed", "steer", "throttle", "brake", "e_y")}
+    out = {k: [] for k in ("x", "y", "z", "heading", "speed", "steer", "throttle", "brake", "e_y")}
     for key in list(PER_NEURON) + list(MEANS):
         out[key] = []
 
@@ -62,6 +62,7 @@ def replay(theta, conn, track_name, max_frames, stride, seed):
         if step % stride == 0:
             out["x"].append(float(env.state[0, 0]))
             out["y"].append(float(env.state[0, 1]))
+            out["z"].append(float(env.track.z[env.idx[0]]))
             out["heading"].append(float(env.state[0, 2]))
             out["speed"].append(float(obs[0, 0] * V_SCALE))
             out["steer"].append(float(action[0, 0]))
@@ -101,8 +102,12 @@ def main() -> None:
     ap.add_argument("--control", default="none")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--stride", type=int, default=5)
-    ap.add_argument("--max-frames", type=int, default=2400)
+    ap.add_argument("--max-frames", type=int, default=3000)
     ap.add_argument("--out", default="training.json")
+    # Without this the run is unreproducible after the fact: the trace can be
+    # replayed but the network it came from cannot be evaluated, raced against
+    # a control, or handed to a mushroom-body session.
+    ap.add_argument("--theta-out", default="results/theta_spa.npz")
     args = ap.parse_args()
 
     cfg = TrainConfig(
@@ -120,17 +125,45 @@ def main() -> None:
     res = train_curriculum(
         cfg, imitation_generations=args.imitation, reward_generations=args.generations
     )
+
+    if args.theta_out:
+        out = Path(args.theta_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            out,
+            theta=res["theta"],
+            best_theta=res["best_theta"],
+            fastest_theta=res["fastest_theta"],
+            fastest_lap=np.array([np.nan if res["fastest_lap"] is None else res["fastest_lap"]]),
+            track=np.array([args.track]),
+            control=np.array([args.control]),
+            seed=np.array([args.seed]),
+        )
+        print(f"wrote {out}  (fastest lap {res['fastest_lap']})", flush=True)
+
     print(f"\ntraining done, {len(res['checkpoints'])} checkpoints -- replaying", flush=True)
 
     conn = driving_subgraph(
         apply_control(build_surrogate(seed=0), args.control, seed=1)
     )
+    # The population mean at the last checkpoint is not the best network the run
+    # found -- evolution strategies keep moving after they first learn to lap.
+    # Replay the fastest parameters too, and label them, so the page can show
+    # the result rather than wherever the search happened to stop.
+    checkpoints = list(res["checkpoints"])
+    if res.get("fastest_lap") is not None:
+        checkpoints.append({
+            "stage": "fastest", "gen": cfg.generations,
+            "theta": res["fastest_theta"],
+            "fit_mean": float("nan"), "progress_mean": float("nan"),
+        })
+
     replays = []
-    for i, ck in enumerate(res["checkpoints"]):
+    for i, ck in enumerate(checkpoints):
         r = replay(ck["theta"], conn, args.track, args.max_frames, args.stride, args.seed + 1)
         r.update(stage=ck["stage"], gen=ck["gen"], fit_mean=ck["fit_mean"])
         replays.append(r)
-        print(f"  [{i+1}/{len(res['checkpoints'])}] {ck['stage']:10s} gen {ck['gen']:3d} "
+        print(f"  [{i+1}/{len(checkpoints)}] {ck['stage']:10s} gen {ck['gen']:3d} "
               f"-> {r['progress']:6.0f} m, lap {r['lap_time']}", flush=True)
 
     # Normalise each population against its maximum across the WHOLE run, not
@@ -156,6 +189,7 @@ def main() -> None:
         f = r["frames"]
         for key in ("x", "y"):
             f[key] = np.round(f[key], 1).tolist()
+        f["z"] = np.round(f["z"], 1).tolist()
         f["heading"] = np.round(f["heading"], 3).tolist()
         f["speed"] = np.round(f["speed"], 1).tolist()
         f["e_y"] = np.round(f["e_y"], 2).tolist()
@@ -190,7 +224,13 @@ def main() -> None:
     payload = {
         "track": {
             "xy": np.round(track.xy[::3], 1).tolist(),
-            "half_width": track.half_width,
+            # Elevation along the same subsampled stations. Spa climbs 106 m,
+            # and a plan view alone cannot show why Raidillon is hard.
+            "z": np.round(track.z[::3], 1).tolist(),
+            "grade": np.round(track.grade[::3] * 100.0, 2).tolist(),
+            "hw_left": np.round(track.hw_left[::3], 2).tolist(),
+            "hw_right": np.round(track.hw_right[::3], 2).tolist(),
+            "half_width": round(float(track.half_width), 2),
             "length": round(track.length, 1),
             "name": args.track,
         },

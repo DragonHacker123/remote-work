@@ -676,9 +676,22 @@ def harmonic(
     return Track.from_controls(pts, name=f"harmonic{seed}", **kw)
 
 
+_REAL_CACHE: dict[tuple, Track] = {}
+
+
 def _load_real(name: str, **kw) -> Track:
-    """Load a surveyed circuit shipped with the package."""
+    """Load a surveyed circuit shipped with the package.
+
+    Cached: solving the racing line takes a couple of seconds, and a training
+    run builds the same circuit in every worker and again for every lap
+    evaluation. Tracks are treated as read-only everywhere downstream, so one
+    instance can safely be shared.
+    """
     from pathlib import Path
+
+    key = (name, tuple(sorted(kw.items())))
+    if key in _REAL_CACHE:
+        return _REAL_CACHE[key]
 
     path = Path(__file__).resolve().parent / "data" / f"{name}.npz"
     if not path.exists():
@@ -688,9 +701,11 @@ def _load_real(name: str, **kw) -> Track:
             "elevation."
         )
     d = np.load(path)
-    return Track.from_centreline(
+    track = Track.from_centreline(
         d["xy"], z=d["z"], w_left=d["w_left"], w_right=d["w_right"], name=name, **kw
     )
+    _REAL_CACHE[key] = track
+    return track
 
 
 TRACKS = {

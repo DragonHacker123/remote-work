@@ -27,7 +27,7 @@ from .es import ESConfig, OpenAIES
 
 @dataclass
 class TrainConfig:
-    track: str = "national"
+    track: str = "spa"
     n_envs: int = 32
     horizon_seconds: float = 25.0
     generations: int = 60
